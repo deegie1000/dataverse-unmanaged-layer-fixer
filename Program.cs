@@ -477,8 +477,10 @@ class Program
             }
         };
 
+        int pageNumber = 1;
         while (true)
         {
+            Console.Write($"\r  Fetching components... (page {pageNumber}, {allComponents.Count} found)    ");
             var results = await Task.Run(() => _serviceClient!.RetrieveMultiple(componentQuery));
             allComponents.AddRange(results.Entities);
 
@@ -486,12 +488,14 @@ class Program
             {
                 componentQuery.PageInfo.PageNumber++;
                 componentQuery.PageInfo.PagingCookie = results.PagingCookie;
+                pageNumber++;
             }
             else
             {
                 break;
             }
         }
+        Console.WriteLine($"\r  Fetching components... done ({allComponents.Count} total)          ");
 
         return allComponents;
     }
@@ -518,8 +522,10 @@ class Program
             }
         };
 
+        int pageNumber = 1;
         while (true)
         {
+            Console.Write($"\r  Fetching Active layers... (page {pageNumber}, {allLayers.Count} found)    ");
             var results = await Task.Run(() => _serviceClient!.RetrieveMultiple(layerQuery));
             allLayers.AddRange(results.Entities);
 
@@ -527,12 +533,14 @@ class Program
             {
                 layerQuery.PageInfo.PageNumber++;
                 layerQuery.PageInfo.PagingCookie = results.PagingCookie;
+                pageNumber++;
             }
             else
             {
                 break;
             }
         }
+        Console.WriteLine($"\r  Fetching Active layers... done ({allLayers.Count} total)          ");
 
         return allLayers;
     }
@@ -587,11 +595,17 @@ class Program
                 }
             };
 
+            Console.Write($"\r  Checking Default solution for unmanaged components...    ");
             var unmanagedSolutionComponents = await Task.Run(() => _serviceClient!.RetrieveMultiple(unmanagedComponentQuery));
+            Console.WriteLine($"\r  Found {unmanagedSolutionComponents.Entities.Count} Power Pages components in Default solution.    ");
 
             // For each unmanaged component, get the actual Power Pages site component details
+            int current = 0;
+            int total = unmanagedSolutionComponents.Entities.Count;
             foreach (var comp in unmanagedSolutionComponents.Entities)
             {
+                current++;
+                Console.Write($"\r  Retrieving component details... ({current}/{total})    ");
                 var objectId = comp.GetAttributeValue<Guid>("objectid");
                 try
                 {
@@ -607,9 +621,14 @@ class Program
                     // Component might not exist or we don't have access
                 }
             }
+            if (total > 0)
+            {
+                Console.WriteLine($"\r  Retrieving component details... done ({unmanagedComponents.Count} retrieved)    ");
+            }
         }
         catch (Exception ex)
         {
+            Console.WriteLine();
             Console.WriteLine($"[DEBUG] Error checking Power Pages components: {ex.Message}");
         }
 
