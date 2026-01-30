@@ -10,7 +10,6 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.PowerPlatform.Dataverse.Client" Version="1.1.27" />
-    <PackageReference Include="Microsoft.Xrm.Sdk" Version="9.0.2.56" />
   </ItemGroup>
 
 </Project>
