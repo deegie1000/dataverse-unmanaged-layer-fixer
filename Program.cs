@@ -184,12 +184,44 @@ class Program
                 c => c.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0
             );
 
+        // Debug: Show component type breakdown
+        var componentTypeCounts = allComponents
+            .GroupBy(c => c.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0)
+            .OrderByDescending(g => g.Count())
+            .Take(10);
+        Console.WriteLine("[DEBUG] Top component types in solution:");
+        foreach (var group in componentTypeCounts)
+        {
+            Console.WriteLine($"  - Type {group.Key} ({GetComponentTypeName(group.Key)}): {group.Count()}");
+        }
+        Console.WriteLine();
+
         Console.WriteLine("Fetching all Active (unmanaged) layers...");
 
         // Fetch ALL Active layers at once (much faster than per-component queries)
         var allActiveLayers = await RetrieveAllActiveLayersAsync();
 
         Console.WriteLine($"Found {allActiveLayers.Count} total Active layers in the environment.");
+
+        // If no Active layers found, check if msdyn_componentlayer has ANY records
+        if (allActiveLayers.Count == 0)
+        {
+            Console.WriteLine("[DEBUG] Checking if msdyn_componentlayer table has any records...");
+            var anyLayersCount = await GetTotalLayerCountAsync();
+            Console.WriteLine($"[DEBUG] Total records in msdyn_componentlayer: {anyLayersCount}");
+
+            if (anyLayersCount == 0)
+            {
+                Console.WriteLine("[DEBUG] The msdyn_componentlayer table appears to be empty.");
+                Console.WriteLine("[DEBUG] This might be expected if Solution Layers feature is not enabled.");
+            }
+            else
+            {
+                Console.WriteLine("[DEBUG] There are layers, but none with solutionname='Active'.");
+                Console.WriteLine("[DEBUG] Checking what solution names exist...");
+                await ShowSampleLayerSolutionNamesAsync();
+            }
+        }
 
         // Debug: Show sample component IDs from both sources to help identify format mismatches
         if (allActiveLayers.Count > 0 && componentIds.Count > 0)
@@ -381,6 +413,53 @@ class Program
         }
 
         return allLayers;
+    }
+
+    private static async Task<int> GetTotalLayerCountAsync()
+    {
+        try
+        {
+            var countQuery = new QueryExpression("msdyn_componentlayer")
+            {
+                ColumnSet = new ColumnSet("msdyn_componentlayerid"),
+                PageInfo = new PagingInfo { Count = 1, PageNumber = 1, ReturnTotalRecordCount = true }
+            };
+
+            var results = await Task.Run(() => _serviceClient!.RetrieveMultiple(countQuery));
+            return results.TotalRecordCount > 0 ? results.TotalRecordCount : results.Entities.Count;
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
+    private static async Task ShowSampleLayerSolutionNamesAsync()
+    {
+        try
+        {
+            var query = new QueryExpression("msdyn_componentlayer")
+            {
+                ColumnSet = new ColumnSet("msdyn_solutionname", "msdyn_name"),
+                PageInfo = new PagingInfo { Count = 50, PageNumber = 1 }
+            };
+
+            var results = await Task.Run(() => _serviceClient!.RetrieveMultiple(query));
+            var solutionNames = results.Entities
+                .Select(e => e.GetAttributeValue<string>("msdyn_solutionname") ?? "null")
+                .Distinct()
+                .Take(10);
+
+            Console.WriteLine("[DEBUG] Sample solution names in msdyn_componentlayer:");
+            foreach (var name in solutionNames)
+            {
+                Console.WriteLine($"  - {name}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[DEBUG] Error querying layer solution names: {ex.Message}");
+        }
     }
 
     private static void DisplayLayerInfo(Entity layer, int componentType)
