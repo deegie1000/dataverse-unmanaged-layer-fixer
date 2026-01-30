@@ -191,12 +191,42 @@ class Program
 
         Console.WriteLine($"Found {allActiveLayers.Count} total Active layers in the environment.");
 
+        // Debug: Show sample component IDs from both sources to help identify format mismatches
+        if (allActiveLayers.Count > 0 && componentIds.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("[DEBUG] Sample solution component IDs (first 3):");
+            foreach (var id in componentIds.Take(3))
+            {
+                Console.WriteLine($"  - {id}");
+            }
+
+            Console.WriteLine("[DEBUG] Sample Active layer component IDs (first 5):");
+            foreach (var layer in allActiveLayers.Take(5))
+            {
+                var layerComponentId = layer.GetAttributeValue<string>("msdyn_componentid") ?? "null";
+                var layerName = layer.GetAttributeValue<string>("msdyn_name") ?? "Unknown";
+                Console.WriteLine($"  - {layerComponentId} ({layerName})");
+            }
+            Console.WriteLine();
+        }
+
         // Filter to only layers that match our solution components
+        // Try matching with and without braces, and normalized to lowercase
         var matchingLayers = allActiveLayers
             .Where(layer =>
             {
-                var componentId = layer.GetAttributeValue<string>("msdyn_componentid")?.ToLowerInvariant();
-                return componentId != null && componentIds.Contains(componentId);
+                var componentId = layer.GetAttributeValue<string>("msdyn_componentid");
+                if (componentId == null) return false;
+
+                // Normalize: remove braces if present and convert to lowercase
+                var normalizedId = componentId.Trim().ToLowerInvariant();
+                if (normalizedId.StartsWith("{") && normalizedId.EndsWith("}"))
+                {
+                    normalizedId = normalizedId.Substring(1, normalizedId.Length - 2);
+                }
+
+                return componentIds.Contains(normalizedId);
             })
             .ToList();
 
@@ -206,6 +236,11 @@ class Program
         if (matchingLayers.Count == 0)
         {
             Console.WriteLine("No unmanaged layers found for this solution's components.");
+            Console.WriteLine();
+            Console.WriteLine("[DEBUG] This could mean:");
+            Console.WriteLine("  - The solution components have no unmanaged customizations");
+            Console.WriteLine("  - The component ID formats don't match between tables");
+            Console.WriteLine("  - Power Pages or other components use a different ID scheme");
             return;
         }
 
