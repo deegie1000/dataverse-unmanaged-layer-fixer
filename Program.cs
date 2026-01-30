@@ -217,7 +217,7 @@ class Program
                         if (await RemoveUnmanagedLayerAsync(layer, componentType))
                             layersRemoved++;
 
-                        await RemoveAllRemainingLayersAsync(components.Entities, components.Entities.ToList().IndexOf(component), ref layersRemoved);
+                        layersRemoved += await RemoveAllRemainingLayersAsync(components.Entities, components.Entities.ToList().IndexOf(component));
                         goto ProcessingComplete;
                     }
 
@@ -344,8 +344,10 @@ class Program
         }
     }
 
-    private static async Task RemoveAllRemainingLayersAsync(DataCollection<Entity> components, int startIndex, ref int layersRemoved)
+    private static async Task<int> RemoveAllRemainingLayersAsync(DataCollection<Entity> components, int startIndex)
     {
+        int layersRemoved = 0;
+
         for (int i = startIndex; i < components.Count; i++)
         {
             var component = components[i];
@@ -368,6 +370,8 @@ class Program
                 Console.WriteLine();
             }
         }
+
+        return layersRemoved;
     }
 
     private static string GetComponentTypeName(int componentType)
