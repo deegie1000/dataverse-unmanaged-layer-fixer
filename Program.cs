@@ -163,29 +163,18 @@ class Program
         Console.WriteLine($"Processing solution: {solutionName}");
         Console.WriteLine("Fetching solution components...");
 
-        // Get all components in the solution
-        var componentQuery = new QueryExpression("solutioncomponent")
-        {
-            ColumnSet = new ColumnSet("componenttype", "objectid", "solutioncomponentid"),
-            Criteria = new FilterExpression
-            {
-                Conditions =
-                {
-                    new ConditionExpression("solutionid", ConditionOperator.Equal, solutionId)
-                }
-            }
-        };
+        // Get all components in the solution with paging support
+        var allComponents = await RetrieveAllComponentsAsync(solutionId);
 
-        var components = await Task.Run(() => _serviceClient!.RetrieveMultiple(componentQuery));
-
-        Console.WriteLine($"Found {components.Entities.Count} components in the solution.");
+        Console.WriteLine($"Found {allComponents.Count} components in the solution.");
         Console.WriteLine();
 
         int componentsWithUnmanagedLayers = 0;
         int layersRemoved = 0;
 
-        foreach (var component in components.Entities)
+        for (int i = 0; i < allComponents.Count; i++)
         {
+            var component = allComponents[i];
             var componentType = component.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
             var objectId = component.GetAttributeValue<Guid>("objectid");
 
@@ -217,7 +206,7 @@ class Program
                         if (await RemoveUnmanagedLayerAsync(layer, componentType))
                             layersRemoved++;
 
-                        layersRemoved += await RemoveAllRemainingLayersAsync(components.Entities, components.Entities.ToList().IndexOf(component));
+                        layersRemoved += await RemoveAllRemainingLayersAsync(allComponents, i);
                         goto ProcessingComplete;
                     }
 
@@ -241,6 +230,47 @@ class Program
         Console.WriteLine($"Summary:");
         Console.WriteLine($"  Components with unmanaged layers: {componentsWithUnmanagedLayers}");
         Console.WriteLine($"  Unmanaged layers removed: {layersRemoved}");
+    }
+
+    private static async Task<List<Entity>> RetrieveAllComponentsAsync(Guid solutionId)
+    {
+        var allComponents = new List<Entity>();
+
+        var componentQuery = new QueryExpression("solutioncomponent")
+        {
+            ColumnSet = new ColumnSet("componenttype", "objectid", "solutioncomponentid"),
+            Criteria = new FilterExpression
+            {
+                Conditions =
+                {
+                    new ConditionExpression("solutionid", ConditionOperator.Equal, solutionId)
+                }
+            },
+            PageInfo = new PagingInfo
+            {
+                Count = 5000,
+                PageNumber = 1,
+                ReturnTotalRecordCount = false
+            }
+        };
+
+        while (true)
+        {
+            var results = await Task.Run(() => _serviceClient!.RetrieveMultiple(componentQuery));
+            allComponents.AddRange(results.Entities);
+
+            if (results.MoreRecords)
+            {
+                componentQuery.PageInfo.PageNumber++;
+                componentQuery.PageInfo.PagingCookie = results.PagingCookie;
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        return allComponents;
     }
 
     private static async Task<List<Entity>> GetUnmanagedLayersAsync(Guid objectId, int componentType)
@@ -344,7 +374,7 @@ class Program
         }
     }
 
-    private static async Task<int> RemoveAllRemainingLayersAsync(DataCollection<Entity> components, int startIndex)
+    private static async Task<int> RemoveAllRemainingLayersAsync(List<Entity> components, int startIndex)
     {
         int layersRemoved = 0;
 
