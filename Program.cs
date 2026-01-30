@@ -17,7 +17,27 @@ class Program
         Console.WriteLine("===========================================");
         Console.WriteLine();
 
-        string environmentUrl = GetEnvironmentUrl(args);
+        // Parse command line arguments
+        string? environmentUrl = null;
+        string? solutionName = null;
+
+        for (int i = 0; i < args.Length; i++)
+        {
+            if (args[i] == "--solution" || args[i] == "-s")
+            {
+                if (i + 1 < args.Length)
+                {
+                    solutionName = args[i + 1];
+                    i++;
+                }
+            }
+            else if (!args[i].StartsWith("-") && environmentUrl == null)
+            {
+                environmentUrl = args[i];
+            }
+        }
+
+        environmentUrl ??= GetEnvironmentUrl();
 
         if (!ConnectToDataverse(environmentUrl))
         {
@@ -29,27 +49,35 @@ class Program
         Console.WriteLine("Connected successfully!");
         Console.WriteLine();
 
-        var solution = await SelectSolutionAsync();
-        if (solution == null)
+        // Main loop - allow processing multiple solutions
+        bool continueProcessing = true;
+        while (continueProcessing)
         {
-            Console.WriteLine("No solution selected. Exiting.");
-            return;
+            var solution = await SelectSolutionAsync(solutionName);
+            if (solution == null)
+            {
+                Console.WriteLine("No solution selected. Exiting.");
+                break;
+            }
+
+            // Clear the solution name after first use (so user can select interactively next time)
+            solutionName = null;
+
+            await ProcessSolutionComponentsAsync(solution);
+
+            Console.WriteLine();
+            Console.Write("Do you want to check another solution? (y/n): ");
+            string? response = Console.ReadLine()?.Trim().ToLower();
+            continueProcessing = response == "y" || response == "yes";
+            Console.WriteLine();
         }
 
-        await ProcessSolutionComponentsAsync(solution);
-
-        Console.WriteLine();
         Console.WriteLine("Processing complete. Press any key to exit.");
         Console.ReadKey();
     }
 
-    private static string GetEnvironmentUrl(string[] args)
+    private static string GetEnvironmentUrl()
     {
-        if (args.Length > 0 && !string.IsNullOrWhiteSpace(args[0]))
-        {
-            return args[0];
-        }
-
         Console.Write("Enter the Dataverse environment URL (e.g., https://yourorg.crm.dynamics.com): ");
         string? url = Console.ReadLine();
 
@@ -96,7 +124,7 @@ class Program
         }
     }
 
-    private static async Task<Entity?> SelectSolutionAsync()
+    private static async Task<Entity?> SelectSolutionAsync(string? solutionNameFilter = null)
     {
         Console.WriteLine("Fetching solutions...");
 
@@ -120,6 +148,29 @@ class Program
         {
             Console.WriteLine("No managed solutions found.");
             return null;
+        }
+
+        // If solution name was provided via command line, find it automatically
+        if (!string.IsNullOrWhiteSpace(solutionNameFilter))
+        {
+            var matchingSolution = solutions.Entities.FirstOrDefault(s =>
+            {
+                var friendlyName = s.GetAttributeValue<string>("friendlyname") ?? "";
+                var uniqueName = s.GetAttributeValue<string>("uniquename") ?? "";
+                return friendlyName.Equals(solutionNameFilter, StringComparison.OrdinalIgnoreCase) ||
+                       uniqueName.Equals(solutionNameFilter, StringComparison.OrdinalIgnoreCase);
+            });
+
+            if (matchingSolution != null)
+            {
+                var name = matchingSolution.GetAttributeValue<string>("friendlyname") ?? "Unknown";
+                Console.WriteLine($"Auto-selected solution: {name}");
+                return matchingSolution;
+            }
+            else
+            {
+                Console.WriteLine($"Solution '{solutionNameFilter}' not found. Showing list...");
+            }
         }
 
         Console.WriteLine();
@@ -263,16 +314,31 @@ class Program
             .ToList();
 
         Console.WriteLine($"Found {matchingLayers.Count} unmanaged layers for components in this solution.");
+
+        // Check for Power Pages site components (types 10295, 10296, 10297)
+        var powerPagesComponentTypes = new HashSet<int> { 10295, 10296, 10297 };
+        var powerPagesComponents = allComponents
+            .Where(c => powerPagesComponentTypes.Contains(c.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0))
+            .ToList();
+
+        List<Entity> unmanagedPowerPagesComponents = new();
+        if (powerPagesComponents.Count > 0)
+        {
+            Console.WriteLine($"Checking {powerPagesComponents.Count} Power Pages site components for unmanaged customizations...");
+            unmanagedPowerPagesComponents = await GetUnmanagedPowerPagesComponentsAsync(powerPagesComponents);
+            Console.WriteLine($"Found {unmanagedPowerPagesComponents.Count} Power Pages components with unmanaged customizations.");
+        }
+
+        int totalUnmanagedCount = matchingLayers.Count + unmanagedPowerPagesComponents.Count;
         Console.WriteLine();
 
-        if (matchingLayers.Count == 0)
+        if (totalUnmanagedCount == 0)
         {
             Console.WriteLine("No unmanaged layers found for this solution's components.");
             Console.WriteLine();
             Console.WriteLine("[DEBUG] This could mean:");
             Console.WriteLine("  - The solution components have no unmanaged customizations");
             Console.WriteLine("  - The component ID formats don't match between tables");
-            Console.WriteLine("  - Power Pages or other components use a different ID scheme");
             return;
         }
 
@@ -327,10 +393,66 @@ class Program
             Console.WriteLine();
         }
 
+        // Process Power Pages components
+        int powerPagesRemoved = 0;
+        if (unmanagedPowerPagesComponents.Count > 0 && !removeAll)
+        {
+            Console.WriteLine();
+            Console.WriteLine("===========================================");
+            Console.WriteLine("  POWER PAGES UNMANAGED CUSTOMIZATIONS");
+            Console.WriteLine("===========================================");
+        }
+
+        for (int i = 0; i < unmanagedPowerPagesComponents.Count; i++)
+        {
+            var ppComponent = unmanagedPowerPagesComponents[i];
+            DisplayPowerPagesComponentInfo(ppComponent);
+
+            if (removeAll)
+            {
+                Console.WriteLine("Auto-removing Power Pages unmanaged customization...");
+                if (await RemovePowerPagesUnmanagedCustomizationAsync(ppComponent))
+                    powerPagesRemoved++;
+                Console.WriteLine();
+                continue;
+            }
+
+            Console.Write("Do you want to remove this unmanaged customization? (y/n/a=all/s=skip all): ");
+            string? response = Console.ReadLine()?.Trim().ToLower();
+
+            if (response == "s")
+            {
+                Console.WriteLine("Skipping remaining components.");
+                break;
+            }
+
+            if (response == "a")
+            {
+                removeAll = true;
+                if (await RemovePowerPagesUnmanagedCustomizationAsync(ppComponent))
+                    powerPagesRemoved++;
+                Console.WriteLine();
+                continue;
+            }
+
+            if (response == "y")
+            {
+                if (await RemovePowerPagesUnmanagedCustomizationAsync(ppComponent))
+                    powerPagesRemoved++;
+            }
+            else
+            {
+                Console.WriteLine("Skipped.");
+            }
+
+            Console.WriteLine();
+        }
+
         Console.WriteLine("-------------------------------------------");
         Console.WriteLine($"Summary:");
-        Console.WriteLine($"  Components with unmanaged layers: {matchingLayers.Count}");
-        Console.WriteLine($"  Unmanaged layers removed: {layersRemoved}");
+        Console.WriteLine($"  Standard components with unmanaged layers: {matchingLayers.Count}");
+        Console.WriteLine($"  Power Pages components with unmanaged customizations: {unmanagedPowerPagesComponents.Count}");
+        Console.WriteLine($"  Total unmanaged layers removed: {layersRemoved + powerPagesRemoved}");
     }
 
     private static async Task<List<Entity>> RetrieveAllComponentsAsync(Guid solutionId)
@@ -413,6 +535,171 @@ class Program
         }
 
         return allLayers;
+    }
+
+    private static async Task<List<Entity>> GetUnmanagedPowerPagesComponentsAsync(List<Entity> powerPagesComponents)
+    {
+        var unmanagedComponents = new List<Entity>();
+
+        try
+        {
+            // Get the Power Pages site component IDs from the managed solution
+            var componentObjectIds = powerPagesComponents
+                .Select(c => c.GetAttributeValue<Guid>("objectid"))
+                .Where(id => id != Guid.Empty)
+                .ToList();
+
+            if (componentObjectIds.Count == 0)
+                return unmanagedComponents;
+
+            // Query the Default solution (unmanaged) for Power Pages site components
+            // that have the same powerpagesitecomponentid as the managed ones
+            // This indicates an unmanaged customization layer
+            var defaultSolutionQuery = new QueryExpression("solution")
+            {
+                ColumnSet = new ColumnSet("solutionid"),
+                Criteria = new FilterExpression
+                {
+                    Conditions =
+                    {
+                        new ConditionExpression("uniquename", ConditionOperator.Equal, "Default")
+                    }
+                }
+            };
+
+            var defaultSolution = await Task.Run(() => _serviceClient!.RetrieveMultiple(defaultSolutionQuery));
+            if (defaultSolution.Entities.Count == 0)
+                return unmanagedComponents;
+
+            var defaultSolutionId = defaultSolution.Entities[0].GetAttributeValue<Guid>("solutionid");
+
+            // Get components from the Default solution that match our Power Pages components
+            var unmanagedComponentQuery = new QueryExpression("solutioncomponent")
+            {
+                ColumnSet = new ColumnSet("objectid", "componenttype"),
+                Criteria = new FilterExpression
+                {
+                    Conditions =
+                    {
+                        new ConditionExpression("solutionid", ConditionOperator.Equal, defaultSolutionId),
+                        new ConditionExpression("objectid", ConditionOperator.In, componentObjectIds.ToArray())
+                    }
+                }
+            };
+
+            var unmanagedSolutionComponents = await Task.Run(() => _serviceClient!.RetrieveMultiple(unmanagedComponentQuery));
+
+            // For each unmanaged component, get the actual Power Pages site component details
+            foreach (var comp in unmanagedSolutionComponents.Entities)
+            {
+                var objectId = comp.GetAttributeValue<Guid>("objectid");
+                try
+                {
+                    var ppComponent = await Task.Run(() => _serviceClient!.Retrieve(
+                        "powerpagesitecomponent",
+                        objectId,
+                        new ColumnSet("powerpagesitecomponentid", "name", "powerpagesitecomponenttype",
+                            "modifiedon", "modifiedby", "powerpagesiteid")));
+                    unmanagedComponents.Add(ppComponent);
+                }
+                catch
+                {
+                    // Component might not exist or we don't have access
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[DEBUG] Error checking Power Pages components: {ex.Message}");
+        }
+
+        return unmanagedComponents;
+    }
+
+    private static void DisplayPowerPagesComponentInfo(Entity ppComponent)
+    {
+        Console.WriteLine();
+        Console.WriteLine("===========================================");
+        Console.WriteLine("  POWER PAGES UNMANAGED CUSTOMIZATION");
+        Console.WriteLine("===========================================");
+
+        string componentName = ppComponent.GetAttributeValue<string>("name") ?? "Unknown";
+        var componentType = ppComponent.GetAttributeValue<OptionSetValue>("powerpagesitecomponenttype");
+        string componentTypeName = componentType != null ? GetPowerPagesComponentTypeName(componentType.Value) : "Unknown";
+        DateTime? modifiedOn = ppComponent.GetAttributeValue<DateTime?>("modifiedon");
+        var modifiedByRef = ppComponent.GetAttributeValue<EntityReference>("modifiedby");
+        string modifiedBy = modifiedByRef?.Name ?? "Unknown";
+
+        Console.WriteLine($"  Component Name:  {componentName}");
+        Console.WriteLine($"  Component Type:  {componentTypeName}");
+        Console.WriteLine($"  Modified On:     {modifiedOn?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A"}");
+        Console.WriteLine($"  Modified By:     {modifiedBy}");
+        Console.WriteLine("-------------------------------------------");
+    }
+
+    private static string GetPowerPagesComponentTypeName(int componentType)
+    {
+        return componentType switch
+        {
+            1 => "Web Page",
+            2 => "Web File",
+            3 => "Web Link Set",
+            4 => "Web Link",
+            5 => "Page Template",
+            6 => "Content Snippet",
+            7 => "Web Template",
+            8 => "Site Setting",
+            9 => "Site Marker",
+            10 => "Entity Form",
+            11 => "Entity List",
+            12 => "Web Form",
+            13 => "Web Form Step",
+            14 => "Web Form Metadata",
+            15 => "Poll",
+            16 => "Poll Option",
+            17 => "Publishing State",
+            18 => "Published State Transition",
+            19 => "Web Role",
+            20 => "Column Permission",
+            21 => "Column Permission Profile",
+            22 => "Table Permission",
+            _ => $"Type {componentType}"
+        };
+    }
+
+    private static async Task<bool> RemovePowerPagesUnmanagedCustomizationAsync(Entity ppComponent)
+    {
+        try
+        {
+            var componentId = ppComponent.GetAttributeValue<Guid>("powerpagesitecomponentid");
+
+            Console.WriteLine("Removing Power Pages unmanaged customization...");
+
+            // Use RemoveActiveCustomizations to remove the unmanaged layer
+            var request = new OrganizationRequest("RemoveActiveCustomizations")
+            {
+                Parameters =
+                {
+                    { "SolutionComponentName", "powerpagesitecomponent" },
+                    { "ComponentId", componentId }
+                }
+            };
+
+            await Task.Run(() => _serviceClient!.Execute(request));
+
+            Console.WriteLine("Power Pages unmanaged customization removed successfully!");
+            return true;
+        }
+        catch (FaultException<OrganizationServiceFault> ex)
+        {
+            Console.WriteLine($"Error removing Power Pages customization: {ex.Message}");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error: {ex.Message}");
+            return false;
+        }
     }
 
     private static async Task<int> GetTotalLayerCountAsync()
