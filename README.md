@@ -9,7 +9,7 @@ When you customize components in Dataverse (such as entities, forms, views, work
 This tool:
 
 1. **Connects to your Dataverse environment** using interactive browser-based authentication
-2. **Lists all unmanaged solutions** in your environment
+2. **Lists all managed solutions** in your environment
 3. **Scans all components** within a selected solution
 4. **Identifies unmanaged layers** for each component by querying the `msdyn_componentlayer` table
 5. **Displays detailed information** about each unmanaged layer found:
@@ -83,12 +83,12 @@ dotnet run
 
 1. **Authentication**: When you run the tool, a browser window will open for Microsoft authentication. Sign in with your Dataverse credentials.
 
-2. **Solution Selection**: The tool displays a numbered list of all unmanaged solutions in your environment:
+2. **Solution Selection**: The tool displays a numbered list of all managed solutions in your environment:
    ```
-   Available Unmanaged Solutions:
-   ------------------------------
-     1. My Custom Solution (mycustomsolution) - v1.0.0.0
-     2. Default Solution (default) - v1.0.0.0
+   Available Managed Solutions:
+   ----------------------------
+     1. Contoso Core Solution (contoso_core) - v1.0.0.0
+     2. Contoso Sales (contoso_sales) - v1.2.0.0
 
    Enter the number of the solution to check (or 0 to exit):
    ```

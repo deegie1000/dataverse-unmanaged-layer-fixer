@@ -107,7 +107,7 @@ class Program
             {
                 Conditions =
                 {
-                    new ConditionExpression("ismanaged", ConditionOperator.Equal, false),
+                    new ConditionExpression("ismanaged", ConditionOperator.Equal, true),
                     new ConditionExpression("isvisible", ConditionOperator.Equal, true)
                 }
             },
@@ -118,13 +118,13 @@ class Program
 
         if (solutions.Entities.Count == 0)
         {
-            Console.WriteLine("No unmanaged solutions found.");
+            Console.WriteLine("No managed solutions found.");
             return null;
         }
 
         Console.WriteLine();
-        Console.WriteLine("Available Unmanaged Solutions:");
-        Console.WriteLine("------------------------------");
+        Console.WriteLine("Available Managed Solutions:");
+        Console.WriteLine("----------------------------");
 
         for (int i = 0; i < solutions.Entities.Count; i++)
         {
