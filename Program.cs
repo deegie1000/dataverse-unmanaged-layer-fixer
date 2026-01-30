@@ -167,68 +167,102 @@ class Program
         var allComponents = await RetrieveAllComponentsAsync(solutionId);
 
         Console.WriteLine($"Found {allComponents.Count} components in the solution.");
+
+        // Build a set of component IDs for fast lookup
+        var componentIds = new HashSet<string>(
+            allComponents
+                .Select(c => c.GetAttributeValue<Guid>("objectid"))
+                .Where(id => id != Guid.Empty)
+                .Select(id => id.ToString().ToLowerInvariant())
+        );
+
+        // Build a lookup of component types by object ID
+        var componentTypeMap = allComponents
+            .Where(c => c.GetAttributeValue<Guid>("objectid") != Guid.Empty)
+            .ToDictionary(
+                c => c.GetAttributeValue<Guid>("objectid").ToString().ToLowerInvariant(),
+                c => c.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0
+            );
+
+        Console.WriteLine("Fetching all Active (unmanaged) layers...");
+
+        // Fetch ALL Active layers at once (much faster than per-component queries)
+        var allActiveLayers = await RetrieveAllActiveLayersAsync();
+
+        Console.WriteLine($"Found {allActiveLayers.Count} total Active layers in the environment.");
+
+        // Filter to only layers that match our solution components
+        var matchingLayers = allActiveLayers
+            .Where(layer =>
+            {
+                var componentId = layer.GetAttributeValue<string>("msdyn_componentid")?.ToLowerInvariant();
+                return componentId != null && componentIds.Contains(componentId);
+            })
+            .ToList();
+
+        Console.WriteLine($"Found {matchingLayers.Count} unmanaged layers for components in this solution.");
         Console.WriteLine();
 
-        int componentsWithUnmanagedLayers = 0;
-        int layersRemoved = 0;
-
-        for (int i = 0; i < allComponents.Count; i++)
+        if (matchingLayers.Count == 0)
         {
-            var component = allComponents[i];
-            var componentType = component.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
-            var objectId = component.GetAttributeValue<Guid>("objectid");
-
-            if (objectId == Guid.Empty)
-                continue;
-
-            var unmanagedLayers = await GetUnmanagedLayersAsync(objectId, componentType);
-
-            if (unmanagedLayers.Count > 0)
-            {
-                componentsWithUnmanagedLayers++;
-
-                foreach (var layer in unmanagedLayers)
-                {
-                    DisplayLayerInfo(layer, componentType);
-
-                    Console.Write("Do you want to remove this unmanaged layer? (y/n/a=all/s=skip all): ");
-                    string? response = Console.ReadLine()?.Trim().ToLower();
-
-                    if (response == "s")
-                    {
-                        Console.WriteLine("Skipping remaining components.");
-                        return;
-                    }
-
-                    if (response == "a")
-                    {
-                        // Remove all remaining unmanaged layers
-                        if (await RemoveUnmanagedLayerAsync(layer, componentType))
-                            layersRemoved++;
-
-                        layersRemoved += await RemoveAllRemainingLayersAsync(allComponents, i);
-                        goto ProcessingComplete;
-                    }
-
-                    if (response == "y")
-                    {
-                        if (await RemoveUnmanagedLayerAsync(layer, componentType))
-                            layersRemoved++;
-                    }
-                    else
-                    {
-                        Console.WriteLine("Skipped.");
-                    }
-
-                    Console.WriteLine();
-                }
-            }
+            Console.WriteLine("No unmanaged layers found for this solution's components.");
+            return;
         }
 
-    ProcessingComplete:
+        int layersRemoved = 0;
+        bool removeAll = false;
+
+        for (int i = 0; i < matchingLayers.Count; i++)
+        {
+            var layer = matchingLayers[i];
+            var componentId = layer.GetAttributeValue<string>("msdyn_componentid")?.ToLowerInvariant() ?? "";
+            var componentType = componentTypeMap.GetValueOrDefault(componentId, 0);
+
+            DisplayLayerInfo(layer, componentType);
+
+            if (removeAll)
+            {
+                Console.WriteLine("Auto-removing unmanaged layer...");
+                if (await RemoveUnmanagedLayerAsync(layer, componentType))
+                    layersRemoved++;
+                Console.WriteLine();
+                continue;
+            }
+
+            Console.Write("Do you want to remove this unmanaged layer? (y/n/a=all/s=skip all): ");
+            string? response = Console.ReadLine()?.Trim().ToLower();
+
+            if (response == "s")
+            {
+                Console.WriteLine("Skipping remaining layers.");
+                break;
+            }
+
+            if (response == "a")
+            {
+                removeAll = true;
+                if (await RemoveUnmanagedLayerAsync(layer, componentType))
+                    layersRemoved++;
+                Console.WriteLine();
+                continue;
+            }
+
+            if (response == "y")
+            {
+                if (await RemoveUnmanagedLayerAsync(layer, componentType))
+                    layersRemoved++;
+            }
+            else
+            {
+                Console.WriteLine("Skipped.");
+            }
+
+            Console.WriteLine();
+        }
+
         Console.WriteLine("-------------------------------------------");
         Console.WriteLine($"Summary:");
-        Console.WriteLine($"  Components with unmanaged layers: {componentsWithUnmanagedLayers}");
+        Console.WriteLine($"  Components with unmanaged layers: {matchingLayers.Count}");
         Console.WriteLine($"  Unmanaged layers removed: {layersRemoved}");
     }
 
@@ -273,41 +307,45 @@ class Program
         return allComponents;
     }
 
-    private static async Task<List<Entity>> GetUnmanagedLayersAsync(Guid objectId, int componentType)
+    private static async Task<List<Entity>> RetrieveAllActiveLayersAsync()
     {
-        try
-        {
-            // Query the msdyn_componentlayer entity to find unmanaged (Active) layers
-            var layerQuery = new QueryExpression("msdyn_componentlayer")
-            {
-                ColumnSet = new ColumnSet(true),
-                Criteria = new FilterExpression
-                {
-                    Conditions =
-                    {
-                        new ConditionExpression("msdyn_componentid", ConditionOperator.Equal, objectId.ToString()),
-                        new ConditionExpression("msdyn_solutionname", ConditionOperator.Equal, "Active")
-                    }
-                }
-            };
+        var allLayers = new List<Entity>();
 
-            var results = await Task.Run(() => _serviceClient!.RetrieveMultiple(layerQuery));
-            return results.Entities.ToList();
-        }
-        catch (FaultException<OrganizationServiceFault> ex)
+        var layerQuery = new QueryExpression("msdyn_componentlayer")
         {
-            // msdyn_componentlayer might not exist in older environments
-            if (ex.Message.Contains("doesn't exist"))
+            ColumnSet = new ColumnSet(true),
+            Criteria = new FilterExpression
             {
-                Console.WriteLine("Warning: Component layer entity not available. Using alternative method.");
-                return new List<Entity>();
+                Conditions =
+                {
+                    new ConditionExpression("msdyn_solutionname", ConditionOperator.Equal, "Active")
+                }
+            },
+            PageInfo = new PagingInfo
+            {
+                Count = 5000,
+                PageNumber = 1,
+                ReturnTotalRecordCount = false
             }
-            throw;
-        }
-        catch (Exception)
+        };
+
+        while (true)
         {
-            return new List<Entity>();
+            var results = await Task.Run(() => _serviceClient!.RetrieveMultiple(layerQuery));
+            allLayers.AddRange(results.Entities);
+
+            if (results.MoreRecords)
+            {
+                layerQuery.PageInfo.PageNumber++;
+                layerQuery.PageInfo.PagingCookie = results.PagingCookie;
+            }
+            else
+            {
+                break;
+            }
         }
+
+        return allLayers;
     }
 
     private static void DisplayLayerInfo(Entity layer, int componentType)
@@ -372,36 +410,6 @@ class Program
             Console.WriteLine($"Error: {ex.Message}");
             return false;
         }
-    }
-
-    private static async Task<int> RemoveAllRemainingLayersAsync(List<Entity> components, int startIndex)
-    {
-        int layersRemoved = 0;
-
-        for (int i = startIndex; i < components.Count; i++)
-        {
-            var component = components[i];
-            var componentType = component.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
-            var objectId = component.GetAttributeValue<Guid>("objectid");
-
-            if (objectId == Guid.Empty)
-                continue;
-
-            var unmanagedLayers = await GetUnmanagedLayersAsync(objectId, componentType);
-
-            foreach (var layer in unmanagedLayers)
-            {
-                DisplayLayerInfo(layer, componentType);
-                Console.WriteLine("Auto-removing unmanaged layer...");
-
-                if (await RemoveUnmanagedLayerAsync(layer, componentType))
-                    layersRemoved++;
-
-                Console.WriteLine();
-            }
-        }
-
-        return layersRemoved;
     }
 
     private static string GetComponentTypeName(int componentType)
