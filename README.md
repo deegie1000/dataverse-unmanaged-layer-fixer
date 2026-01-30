@@ -9,16 +9,18 @@ When you customize components in Dataverse (such as entities, forms, views, work
 This tool:
 
 1. **Connects to your Dataverse environment** using interactive browser-based authentication
-2. **Lists all managed solutions** in your environment
+2. **Lists all managed solutions** in your environment (or auto-selects if specified via command line)
 3. **Scans all components** within a selected solution
 4. **Identifies unmanaged layers** for each component by querying the `msdyn_componentlayer` table
-5. **Displays detailed information** about each unmanaged layer found:
+5. **Supports Power Pages components** which use a different tracking mechanism (checks the Default solution)
+6. **Displays detailed information** about each unmanaged layer found:
    - Component name and type
    - Solution layer name
    - Layer order
    - Modified date
    - Publisher/modifier information
-6. **Prompts you to remove** unwanted unmanaged layers using the `RemoveActiveCustomizations` API
+7. **Prompts you to remove** unwanted unmanaged layers using the `RemoveActiveCustomizations` API
+8. **Allows processing multiple solutions** in a single session
 
 ## Prerequisites
 
@@ -57,26 +59,35 @@ This tool:
 
 ## Usage
 
-### Running with Command-Line Argument
+### Command-Line Arguments
 
-Pass the Dataverse environment URL as an argument:
+| Argument | Description |
+|----------|-------------|
+| `<url>` | The Dataverse environment URL (e.g., `https://yourorg.crm.dynamics.com`) |
+| `--solution <name>` or `-s <name>` | (Optional) Auto-select a solution by friendly name or unique name |
 
+### Examples
+
+**Basic usage - interactive solution selection:**
 ```bash
 dotnet run -- https://yourorg.crm.dynamics.com
 ```
 
-### Running Interactively
+**Specify a solution to check:**
+```bash
+dotnet run -- https://yourorg.crm.dynamics.com --solution "My Solution Name"
+# or using the short form
+dotnet run -- https://yourorg.crm.dynamics.com -s MySolutionUniqueName
+```
 
-Run without arguments and enter the URL when prompted:
-
+**Running interactively (prompts for URL):**
 ```bash
 dotnet run
 ```
 
-### Using the Published Executable
-
+**Using the published executable:**
 ```bash
-./DataverseUnmanagedLayerFixer https://yourorg.crm.dynamics.com
+./DataverseUnmanagedLayerFixer https://yourorg.crm.dynamics.com -s MySolution
 ```
 
 ## Walkthrough
@@ -120,9 +131,31 @@ dotnet run
    ```
    -------------------------------------------
    Summary:
-     Components with unmanaged layers: 5
-     Unmanaged layers removed: 3
+     Standard components with unmanaged layers: 5
+     Power Pages components with unmanaged customizations: 2
+     Total unmanaged layers removed: 3
    ```
+
+7. **Multiple Solutions**: After completing a solution, you'll be prompted:
+   ```
+   Do you want to check another solution? (y/n):
+   ```
+
+## Power Pages Support
+
+Power Pages site components (web pages, web templates, content snippets, etc.) don't use the standard `msdyn_componentlayer` table for tracking customizations. Instead, this tool:
+
+1. Identifies Power Pages components in the solution (component types 10295, 10296, 10297)
+2. Checks the **Default solution** for unmanaged customization records
+3. Displays Power Pages-specific information (component type name, modified by/on)
+4. Uses `RemoveActiveCustomizations` to remove the unmanaged layer
+
+Power Pages component types detected:
+- Web Page, Web File, Web Link Set, Web Link
+- Page Template, Content Snippet, Web Template
+- Site Setting, Site Marker
+- Entity Form, Entity List, Web Form
+- Web Role, Table Permission, and more
 
 ## Important Notes
 
