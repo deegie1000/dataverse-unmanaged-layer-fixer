@@ -4,13 +4,16 @@ using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Metadata;
 using Microsoft.Xrm.Sdk.Query;
+using System.Net.Http.Headers;
 using System.ServiceModel;
+using System.Text.Json;
 
 namespace DataverseUnmanagedLayerFixer;
 
 class Program
 {
     private static ServiceClient? _serviceClient;
+    private static HttpClient? _httpClient;
 
     static async Task Main(string[] args)
     {
@@ -50,6 +53,9 @@ class Program
         Console.WriteLine();
         Console.WriteLine("Connected successfully!");
         Console.WriteLine();
+
+        // Initialize HttpClient for Web API calls
+        InitializeHttpClient();
 
         // Main loop - allow processing multiple solutions
         bool continueProcessing = true;
@@ -124,6 +130,20 @@ class Program
             Console.WriteLine($"Error connecting to Dataverse: {ex.Message}");
             return false;
         }
+    }
+
+    private static void InitializeHttpClient()
+    {
+        _httpClient = new HttpClient
+        {
+            BaseAddress = _serviceClient!.ConnectedOrgUriActual
+        };
+        _httpClient.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", _serviceClient.CurrentAccessToken);
+        _httpClient.DefaultRequestHeaders.Add("OData-MaxVersion", "4.0");
+        _httpClient.DefaultRequestHeaders.Add("OData-Version", "4.0");
+        _httpClient.DefaultRequestHeaders.Accept.Add(
+            new MediaTypeWithQualityHeaderValue("application/json"));
     }
 
     private static async Task<Entity?> SelectSolutionAsync(string? solutionNameFilter = null)
@@ -539,48 +559,66 @@ class Program
 
             try
             {
-                // Use RetrieveSolutionComponentLayers to check for Active layer
-                var layersRequest = new OrganizationRequest("RetrieveSolutionComponentLayers")
+                // Use Web API to call RetrieveSolutionComponentLayers function
+                var apiUrl = $"api/data/v9.2/RetrieveSolutionComponentLayers(SolutionComponentName=@p1,ComponentId=@p2)" +
+                    $"?@p1='{componentLogicalName}'&@p2={objectId}";
+
+                var response = await _httpClient!.GetAsync(apiUrl);
+
+                if (response.IsSuccessStatusCode)
                 {
-                    Parameters =
+                    var jsonContent = await response.Content.ReadAsStringAsync();
+                    using var doc = JsonDocument.Parse(jsonContent);
+
+                    if (doc.RootElement.TryGetProperty("value", out var layersArray))
                     {
-                        { "SolutionComponentName", componentLogicalName },
-                        { "ComponentId", objectId }
-                    }
-                };
-
-                var layersResponse = await Task.Run(() => _serviceClient!.Execute(layersRequest));
-
-                if (layersResponse.Results.Contains("SolutionComponentLayers"))
-                {
-                    var layers = layersResponse.Results["SolutionComponentLayers"] as EntityCollection;
-                    if (layers != null)
-                    {
-                        // Find the Active (unmanaged) layer
-                        var activeLayer = layers.Entities.FirstOrDefault(l =>
-                            l.GetAttributeValue<string>("msdyn_solutionname") == "Active");
-
-                        if (activeLayer != null)
+                        foreach (var layerJson in layersArray.EnumerateArray())
                         {
-                            results.Add((component, activeLayer, componentLogicalName));
+                            var solutionName = layerJson.TryGetProperty("msdyn_solutionname", out var solNameProp)
+                                ? solNameProp.GetString()
+                                : null;
+
+                            if (solutionName == "Active")
+                            {
+                                // Create an Entity to hold the layer data for display
+                                var activeLayer = new Entity("msdyn_componentlayer");
+                                activeLayer["msdyn_solutionname"] = solutionName;
+
+                                if (layerJson.TryGetProperty("msdyn_name", out var nameProp))
+                                    activeLayer["msdyn_name"] = nameProp.GetString();
+                                if (layerJson.TryGetProperty("msdyn_componentid", out var compIdProp))
+                                    activeLayer["msdyn_componentid"] = compIdProp.GetString();
+                                if (layerJson.TryGetProperty("msdyn_order", out var orderProp))
+                                    activeLayer["msdyn_order"] = orderProp.GetInt32();
+                                if (layerJson.TryGetProperty("msdyn_publishername", out var pubProp))
+                                    activeLayer["msdyn_publishername"] = pubProp.GetString();
+                                if (layerJson.TryGetProperty("msdyn_overwritetime", out var timeProp))
+                                {
+                                    if (DateTime.TryParse(timeProp.GetString(), out var overwriteTime))
+                                        activeLayer["msdyn_overwritetime"] = overwriteTime;
+                                }
+
+                                results.Add((component, activeLayer, componentLogicalName));
+                                break; // Only need the Active layer
+                            }
                         }
                     }
                 }
-            }
-            catch (FaultException<OrganizationServiceFault> ex)
-            {
-                // This component type might not support RetrieveSolutionComponentLayers
-                errorTypes[componentType] = errorTypes.GetValueOrDefault(componentType) + 1;
-
-                // Log first error of each type for debugging
-                if (errorTypes[componentType] == 1)
+                else
                 {
-                    Console.WriteLine($"\n    [DEBUG] First error for type {componentType} ({componentLogicalName}): {ex.Detail?.Message ?? ex.Message}");
+                    errorTypes[componentType] = errorTypes.GetValueOrDefault(componentType) + 1;
+
+                    // Log first error of each type for debugging
+                    if (errorTypes[componentType] == 1)
+                    {
+                        var errorContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"\n    [DEBUG] First error for type {componentType} ({componentLogicalName}): {response.StatusCode} - {errorContent.Substring(0, Math.Min(200, errorContent.Length))}");
+                    }
                 }
             }
             catch (Exception ex)
             {
-                // Skip other errors
+                // Skip errors
                 errorTypes[componentType] = errorTypes.GetValueOrDefault(componentType) + 1;
 
                 // Log first error of each type for debugging
