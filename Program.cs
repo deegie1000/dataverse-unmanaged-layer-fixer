@@ -1,6 +1,8 @@
 using Microsoft.Crm.Sdk.Messages;
 using Microsoft.PowerPlatform.Dataverse.Client;
 using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Messages;
+using Microsoft.Xrm.Sdk.Metadata;
 using Microsoft.Xrm.Sdk.Query;
 using System.ServiceModel;
 
@@ -244,12 +246,26 @@ class Program
         Console.WriteLine($"  Power Pages components: {powerPagesComponents.Count}");
         Console.WriteLine();
 
+        // Build entity metadata lookup for Entity components (type 1)
+        // The RetrieveSolutionComponentLayers API requires the actual entity logical name, not "entity"
+        var entityComponents = standardComponents
+            .Where(c => c.GetAttributeValue<OptionSetValue>("componenttype")?.Value == 1)
+            .ToList();
+
+        Dictionary<Guid, string> entityMetadataMap = new();
+        if (entityComponents.Count > 0)
+        {
+            Console.WriteLine($"Resolving entity names for {entityComponents.Count} entity components...");
+            entityMetadataMap = await GetEntityMetadataMapAsync(entityComponents);
+            Console.WriteLine($"  Resolved {entityMetadataMap.Count} entity names.");
+        }
+
         // Check standard components for unmanaged layers using RetrieveSolutionComponentLayers
-        var matchingLayers = new List<(Entity Component, Entity Layer)>();
+        var matchingLayers = new List<(Entity Component, Entity Layer, string LogicalName)>();
         if (standardComponents.Count > 0)
         {
             Console.WriteLine("Checking standard components for unmanaged layers...");
-            matchingLayers = await GetUnmanagedLayersForComponentsAsync(standardComponents);
+            matchingLayers = await GetUnmanagedLayersForComponentsAsync(standardComponents, entityMetadataMap);
             Console.WriteLine($"Found {matchingLayers.Count} standard components with unmanaged layers.");
         }
 
@@ -277,7 +293,7 @@ class Program
         // Process standard component layers
         for (int i = 0; i < matchingLayers.Count; i++)
         {
-            var (component, layer) = matchingLayers[i];
+            var (component, layer, logicalName) = matchingLayers[i];
             var componentType = component.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
 
             DisplayLayerInfo(layer, componentType);
@@ -285,7 +301,7 @@ class Program
             if (removeAll)
             {
                 Console.WriteLine("Auto-removing unmanaged layer...");
-                if (await RemoveUnmanagedLayerAsync(layer, componentType))
+                if (await RemoveUnmanagedLayerAsync(layer, logicalName))
                     layersRemoved++;
                 Console.WriteLine();
                 continue;
@@ -303,7 +319,7 @@ class Program
             if (response == "a")
             {
                 removeAll = true;
-                if (await RemoveUnmanagedLayerAsync(layer, componentType))
+                if (await RemoveUnmanagedLayerAsync(layer, logicalName))
                     layersRemoved++;
                 Console.WriteLine();
                 continue;
@@ -311,7 +327,7 @@ class Program
 
             if (response == "y")
             {
-                if (await RemoveUnmanagedLayerAsync(layer, componentType))
+                if (await RemoveUnmanagedLayerAsync(layer, logicalName))
                     layersRemoved++;
             }
             else
@@ -429,10 +445,51 @@ class Program
         return allComponents;
     }
 
-    private static async Task<List<(Entity Component, Entity Layer)>> GetUnmanagedLayersForComponentsAsync(
-        List<Entity> components)
+    private static async Task<Dictionary<Guid, string>> GetEntityMetadataMapAsync(List<Entity> entityComponents)
     {
-        var results = new List<(Entity Component, Entity Layer)>();
+        var entityMap = new Dictionary<Guid, string>();
+
+        // Get all entity metadata IDs from the solution components
+        var metadataIds = entityComponents
+            .Select(c => c.GetAttributeValue<Guid>("objectid"))
+            .Where(id => id != Guid.Empty)
+            .ToHashSet();
+
+        if (metadataIds.Count == 0)
+            return entityMap;
+
+        try
+        {
+            // Retrieve all entity metadata - this gives us MetadataId and LogicalName
+            var request = new RetrieveAllEntitiesRequest
+            {
+                EntityFilters = EntityFilters.Entity,
+                RetrieveAsIfPublished = false
+            };
+
+            var response = await Task.Run(() =>
+                (RetrieveAllEntitiesResponse)_serviceClient!.Execute(request));
+
+            foreach (var entityMetadata in response.EntityMetadata)
+            {
+                if (metadataIds.Contains(entityMetadata.MetadataId ?? Guid.Empty))
+                {
+                    entityMap[entityMetadata.MetadataId!.Value] = entityMetadata.LogicalName;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Warning: Could not retrieve entity metadata: {ex.Message}");
+        }
+
+        return entityMap;
+    }
+
+    private static async Task<List<(Entity Component, Entity Layer, string LogicalName)>> GetUnmanagedLayersForComponentsAsync(
+        List<Entity> components, Dictionary<Guid, string> entityMetadataMap)
+    {
+        var results = new List<(Entity Component, Entity Layer, string LogicalName)>();
         var skippedTypes = new Dictionary<int, int>(); // Track skipped component types
         var errorTypes = new Dictionary<int, int>(); // Track types that error on API call
         int current = 0;
@@ -454,7 +511,22 @@ class Program
                 continue;
 
             // Get the solution component logical name for this component type
-            var componentLogicalName = GetSolutionComponentLogicalName(componentType);
+            string? componentLogicalName;
+
+            // For Entity (type 1), use the actual entity logical name from metadata
+            if (componentType == 1)
+            {
+                if (!entityMetadataMap.TryGetValue(objectId, out var entityName))
+                {
+                    skippedTypes[componentType] = skippedTypes.GetValueOrDefault(componentType) + 1;
+                    continue;
+                }
+                componentLogicalName = entityName;
+            }
+            else
+            {
+                componentLogicalName = GetSolutionComponentLogicalName(componentType);
+            }
 
             // Skip unsupported component types and track them
             if (componentLogicalName == null)
@@ -490,7 +562,7 @@ class Program
 
                         if (activeLayer != null)
                         {
-                            results.Add((component, activeLayer));
+                            results.Add((component, activeLayer, componentLogicalName));
                         }
                     }
                 }
@@ -775,7 +847,7 @@ class Program
         Console.WriteLine("-------------------------------------------");
     }
 
-    private static async Task<bool> RemoveUnmanagedLayerAsync(Entity layer, int componentType)
+    private static async Task<bool> RemoveUnmanagedLayerAsync(Entity layer, string solutionComponentName)
     {
         try
         {
@@ -787,13 +859,6 @@ class Program
                 return false;
             }
 
-            var logicalName = GetSolutionComponentLogicalName(componentType);
-            if (logicalName == null)
-            {
-                Console.WriteLine($"Error: Unsupported component type ({componentType}).");
-                return false;
-            }
-
             Console.WriteLine("Removing unmanaged layer...");
 
             // Use RemoveActiveCustomizations to remove the unmanaged layer
@@ -801,7 +866,7 @@ class Program
             {
                 Parameters =
                 {
-                    { "SolutionComponentName", logicalName },
+                    { "SolutionComponentName", solutionComponentName },
                     { "ComponentId", objectId }
                 }
             };
