@@ -559,10 +559,10 @@ class Program
 
             try
             {
-                // Use Web API to call RetrieveSolutionComponentLayers function
-                // Note: Leading slash ensures proper URL joining with base address
-                var apiUrl = $"/api/data/v9.2/RetrieveSolutionComponentLayers(SolutionComponentName=@p1,ComponentId=@p2)" +
-                    $"?@p1='{componentLogicalName}'&@p2={objectId}";
+                // Query msdyn_componentlayer table directly via Web API
+                // Filter by componentid and look for Active layer
+                var apiUrl = $"/api/data/v9.2/msdyn_componentlayers?" +
+                    $"$filter=msdyn_componentid eq '{objectId}' and msdyn_solutionname eq 'Active'";
 
                 var response = await _httpClient!.GetAsync(apiUrl);
 
@@ -575,33 +575,26 @@ class Program
                     {
                         foreach (var layerJson in layersArray.EnumerateArray())
                         {
-                            var solutionName = layerJson.TryGetProperty("msdyn_solutionname", out var solNameProp)
-                                ? solNameProp.GetString()
-                                : null;
+                            // Create an Entity to hold the layer data for display
+                            var activeLayer = new Entity("msdyn_componentlayer");
+                            activeLayer["msdyn_solutionname"] = "Active";
 
-                            if (solutionName == "Active")
+                            if (layerJson.TryGetProperty("msdyn_name", out var nameProp))
+                                activeLayer["msdyn_name"] = nameProp.GetString();
+                            if (layerJson.TryGetProperty("msdyn_componentid", out var compIdProp))
+                                activeLayer["msdyn_componentid"] = compIdProp.GetString();
+                            if (layerJson.TryGetProperty("msdyn_order", out var orderProp))
+                                activeLayer["msdyn_order"] = orderProp.GetInt32();
+                            if (layerJson.TryGetProperty("msdyn_publishername", out var pubProp))
+                                activeLayer["msdyn_publishername"] = pubProp.GetString();
+                            if (layerJson.TryGetProperty("msdyn_overwritetime", out var timeProp))
                             {
-                                // Create an Entity to hold the layer data for display
-                                var activeLayer = new Entity("msdyn_componentlayer");
-                                activeLayer["msdyn_solutionname"] = solutionName;
-
-                                if (layerJson.TryGetProperty("msdyn_name", out var nameProp))
-                                    activeLayer["msdyn_name"] = nameProp.GetString();
-                                if (layerJson.TryGetProperty("msdyn_componentid", out var compIdProp))
-                                    activeLayer["msdyn_componentid"] = compIdProp.GetString();
-                                if (layerJson.TryGetProperty("msdyn_order", out var orderProp))
-                                    activeLayer["msdyn_order"] = orderProp.GetInt32();
-                                if (layerJson.TryGetProperty("msdyn_publishername", out var pubProp))
-                                    activeLayer["msdyn_publishername"] = pubProp.GetString();
-                                if (layerJson.TryGetProperty("msdyn_overwritetime", out var timeProp))
-                                {
-                                    if (DateTime.TryParse(timeProp.GetString(), out var overwriteTime))
-                                        activeLayer["msdyn_overwritetime"] = overwriteTime;
-                                }
-
-                                results.Add((component, activeLayer, componentLogicalName));
-                                break; // Only need the Active layer
+                                if (DateTime.TryParse(timeProp.GetString(), out var overwriteTime))
+                                    activeLayer["msdyn_overwritetime"] = overwriteTime;
                             }
+
+                            results.Add((component, activeLayer, componentLogicalName));
+                            break; // Only need the Active layer
                         }
                     }
                 }
