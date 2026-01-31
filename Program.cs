@@ -567,15 +567,27 @@ class Program
                     }
                 }
             }
-            catch (FaultException<OrganizationServiceFault>)
+            catch (FaultException<OrganizationServiceFault> ex)
             {
                 // This component type might not support RetrieveSolutionComponentLayers
                 errorTypes[componentType] = errorTypes.GetValueOrDefault(componentType) + 1;
+
+                // Log first error of each type for debugging
+                if (errorTypes[componentType] == 1)
+                {
+                    Console.WriteLine($"\n    [DEBUG] First error for type {componentType} ({componentLogicalName}): {ex.Detail?.Message ?? ex.Message}");
+                }
             }
-            catch
+            catch (Exception ex)
             {
                 // Skip other errors
                 errorTypes[componentType] = errorTypes.GetValueOrDefault(componentType) + 1;
+
+                // Log first error of each type for debugging
+                if (errorTypes[componentType] == 1)
+                {
+                    Console.WriteLine($"\n    [DEBUG] First error for type {componentType}: {ex.Message}");
+                }
             }
         }
 
