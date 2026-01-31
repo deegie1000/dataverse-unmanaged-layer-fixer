@@ -166,16 +166,13 @@ dotnet run
    ```
    Found 25 unmanaged customizations across 2 solution(s).
    Do you want to export results to Excel? (y/n): y
-
-   Default filename: D365-Solution-Active-Layers-20240115_143022.xlsx
-   Enter file path (or press Enter for default):
-   Results exported to: D365-Solution-Active-Layers-20240115_143022.xlsx
+   Opening file save dialog...
    ```
 
-   You can:
-   - Press Enter to use the default filename in the current directory
-   - Enter a full file path (e.g., `C:\Reports\my-export.xlsx`)
-   - Enter just a directory path to use the default filename in that directory
+   A Windows **Save File dialog** will open allowing you to:
+   - Choose the save location
+   - Change the filename (default: `D365-Solution-Active-Layers-{timestamp}.xlsx`)
+   - The dialog defaults to your Documents folder
 
    The Excel file includes:
    - **One worksheet per solution** (worksheet name = solution name)

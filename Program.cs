@@ -8,6 +8,7 @@ using Microsoft.Xrm.Sdk.Query;
 using System.Net.Http.Headers;
 using System.ServiceModel;
 using System.Text.Json;
+using System.Windows.Forms;
 
 namespace DataverseUnmanagedLayerFixer;
 
@@ -116,35 +117,16 @@ class Program
                 var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 var defaultFileName = $"D365-Solution-Active-Layers-{timestamp}.xlsx";
 
-                Console.WriteLine();
-                Console.WriteLine($"Default filename: {defaultFileName}");
-                Console.Write("Enter file path (or press Enter for default): ");
-                string? customPath = Console.ReadLine()?.Trim();
+                string? filePath = ShowSaveFileDialog(defaultFileName);
 
-                string filePath;
-                if (string.IsNullOrWhiteSpace(customPath))
+                if (!string.IsNullOrEmpty(filePath))
                 {
-                    filePath = defaultFileName;
+                    ExportResultsToExcel(allSolutionResults, filePath);
                 }
                 else
                 {
-                    // If user provided just a directory, append the default filename
-                    if (Directory.Exists(customPath))
-                    {
-                        filePath = Path.Combine(customPath, defaultFileName);
-                    }
-                    else
-                    {
-                        filePath = customPath;
-                        // Ensure it has .xlsx extension
-                        if (!filePath.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
-                        {
-                            filePath += ".xlsx";
-                        }
-                    }
+                    Console.WriteLine("Export cancelled.");
                 }
-
-                ExportResultsToExcel(allSolutionResults, filePath);
             }
         }
 
@@ -164,6 +146,39 @@ class Program
         }
 
         return url.Trim();
+    }
+
+    [STAThread]
+    private static string? ShowSaveFileDialog(string defaultFileName)
+    {
+        Console.WriteLine("Opening file save dialog...");
+
+        string? selectedPath = null;
+
+        // Run the dialog on an STA thread (required for Windows Forms dialogs)
+        var thread = new Thread(() =>
+        {
+            using var saveDialog = new SaveFileDialog
+            {
+                Title = "Save Unmanaged Layers Report",
+                Filter = "Excel Files (*.xlsx)|*.xlsx|All Files (*.*)|*.*",
+                DefaultExt = "xlsx",
+                FileName = defaultFileName,
+                InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                OverwritePrompt = true
+            };
+
+            if (saveDialog.ShowDialog() == DialogResult.OK)
+            {
+                selectedPath = saveDialog.FileName;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+
+        return selectedPath;
     }
 
     private static bool ConnectToDataverse(string environmentUrl)
