@@ -79,26 +79,41 @@ class Program
         bool continueProcessing = true;
         while (continueProcessing)
         {
-            var solution = await SelectSolutionAsync(solutionName);
-            if (solution == null)
+            var selectedSolutions = await SelectSolutionsAsync(solutionName);
+            if (selectedSolutions.Count == 0)
             {
-                Console.WriteLine("No solution selected. Exiting.");
+                if (allSolutionResults.Count == 0)
+                {
+                    Console.WriteLine("No solution selected. Exiting.");
+                }
                 break;
             }
 
             // Clear the solution name after first use (so user can select interactively next time)
             solutionName = null;
 
-            var solutionFriendlyName = solution.GetAttributeValue<string>("friendlyname") ?? "Unknown";
-            var results = await ProcessSolutionComponentsAsync(solution);
-
-            if (results.Count > 0)
+            // Process all selected solutions
+            for (int i = 0; i < selectedSolutions.Count; i++)
             {
-                allSolutionResults[solutionFriendlyName] = results;
+                var solution = selectedSolutions[i];
+                var solutionFriendlyName = solution.GetAttributeValue<string>("friendlyname") ?? "Unknown";
+
+                if (selectedSolutions.Count > 1)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine($"========== Processing solution {i + 1} of {selectedSolutions.Count} ==========");
+                }
+
+                var results = await ProcessSolutionComponentsAsync(solution);
+
+                if (results.Count > 0)
+                {
+                    allSolutionResults[solutionFriendlyName] = results;
+                }
             }
 
             Console.WriteLine();
-            Console.Write("Do you want to check another solution? (y/n): ");
+            Console.Write("Do you want to check more solutions? (y/n): ");
             string? response = Console.ReadLine()?.Trim().ToLower();
             continueProcessing = response == "y" || response == "yes";
             Console.WriteLine();
@@ -229,7 +244,7 @@ class Program
             new MediaTypeWithQualityHeaderValue("application/json"));
     }
 
-    private static async Task<Entity?> SelectSolutionAsync(string? solutionNameFilter = null)
+    private static async Task<List<Entity>> SelectSolutionsAsync(string? solutionNameFilter = null)
     {
         Console.WriteLine("Fetching solutions...");
 
@@ -252,30 +267,43 @@ class Program
         if (solutions.Entities.Count == 0)
         {
             Console.WriteLine("No managed solutions found.");
-            return null;
+            return new List<Entity>();
         }
 
         // If solution name was provided via command line, find it automatically
         if (!string.IsNullOrWhiteSpace(solutionNameFilter))
         {
-            var matchingSolution = solutions.Entities.FirstOrDefault(s =>
-            {
-                var friendlyName = s.GetAttributeValue<string>("friendlyname") ?? "";
-                var uniqueName = s.GetAttributeValue<string>("uniquename") ?? "";
-                return friendlyName.Equals(solutionNameFilter, StringComparison.OrdinalIgnoreCase) ||
-                       uniqueName.Equals(solutionNameFilter, StringComparison.OrdinalIgnoreCase);
-            });
+            // Support comma-delimited solution names from command line
+            var filterNames = solutionNameFilter.Split(',').Select(s => s.Trim()).ToList();
+            var matchingSolutions = new List<Entity>();
 
-            if (matchingSolution != null)
+            foreach (var filterName in filterNames)
             {
-                var name = matchingSolution.GetAttributeValue<string>("friendlyname") ?? "Unknown";
-                Console.WriteLine($"Auto-selected solution: {name}");
-                return matchingSolution;
+                var matchingSolution = solutions.Entities.FirstOrDefault(s =>
+                {
+                    var friendlyName = s.GetAttributeValue<string>("friendlyname") ?? "";
+                    var uniqueName = s.GetAttributeValue<string>("uniquename") ?? "";
+                    return friendlyName.Equals(filterName, StringComparison.OrdinalIgnoreCase) ||
+                           uniqueName.Equals(filterName, StringComparison.OrdinalIgnoreCase);
+                });
+
+                if (matchingSolution != null)
+                {
+                    var name = matchingSolution.GetAttributeValue<string>("friendlyname") ?? "Unknown";
+                    Console.WriteLine($"Auto-selected solution: {name}");
+                    matchingSolutions.Add(matchingSolution);
+                }
+                else
+                {
+                    Console.WriteLine($"Solution '{filterName}' not found.");
+                }
             }
-            else
+
+            if (matchingSolutions.Count > 0)
             {
-                Console.WriteLine($"Solution '{solutionNameFilter}' not found. Showing list...");
+                return matchingSolutions;
             }
+            Console.WriteLine("No matching solutions found. Showing list...");
         }
 
         Console.WriteLine();
@@ -292,21 +320,64 @@ class Program
         }
 
         Console.WriteLine();
-        Console.Write("Enter the number of the solution to check (or 0 to exit): ");
+        Console.WriteLine("Enter solution number(s) to check (comma-separated, e.g., 1,3,5) or 0 to exit:");
+        Console.Write("> ");
 
         while (true)
         {
-            string? input = Console.ReadLine();
-            if (int.TryParse(input, out int selection))
-            {
-                if (selection == 0)
-                    return null;
+            string? input = Console.ReadLine()?.Trim();
 
-                if (selection >= 1 && selection <= solutions.Entities.Count)
-                    return solutions.Entities[selection - 1];
+            if (string.IsNullOrEmpty(input))
+            {
+                Console.Write("Please enter a selection: ");
+                continue;
             }
 
-            Console.Write("Invalid selection. Please enter a valid number: ");
+            if (input == "0")
+                return new List<Entity>();
+
+            // Parse comma-delimited list of numbers
+            var selectedSolutions = new List<Entity>();
+            var parts = input.Split(',').Select(s => s.Trim()).Where(s => !string.IsNullOrEmpty(s));
+            bool validInput = true;
+
+            foreach (var part in parts)
+            {
+                if (int.TryParse(part, out int selection))
+                {
+                    if (selection >= 1 && selection <= solutions.Entities.Count)
+                    {
+                        var selectedSolution = solutions.Entities[selection - 1];
+                        if (!selectedSolutions.Contains(selectedSolution))
+                        {
+                            selectedSolutions.Add(selectedSolution);
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine($"  Invalid selection: {selection} (must be 1-{solutions.Entities.Count})");
+                        validInput = false;
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"  Invalid input: '{part}' is not a number");
+                    validInput = false;
+                }
+            }
+
+            if (validInput && selectedSolutions.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine($"Selected {selectedSolutions.Count} solution(s):");
+                foreach (var sol in selectedSolutions)
+                {
+                    Console.WriteLine($"  - {sol.GetAttributeValue<string>("friendlyname")}");
+                }
+                return selectedSolutions;
+            }
+
+            Console.Write("Please enter valid solution number(s): ");
         }
     }
 

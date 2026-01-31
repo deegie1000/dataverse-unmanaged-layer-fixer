@@ -67,7 +67,7 @@ This tool:
 | Argument | Description |
 |----------|-------------|
 | `<url>` | The Dataverse environment URL (e.g., `https://yourorg.crm.dynamics.com`) |
-| `--solution <name>` or `-s <name>` | (Optional) Auto-select a solution by friendly name or unique name |
+| `--solution <name>` or `-s <name>` | (Optional) Auto-select solution(s) by friendly name or unique name. Use comma-separated values for multiple solutions. |
 
 ### Examples
 
@@ -76,11 +76,16 @@ This tool:
 dotnet run -- https://yourorg.crm.dynamics.com
 ```
 
-**Specify a solution to check:**
+**Specify a single solution to check:**
 ```bash
 dotnet run -- https://yourorg.crm.dynamics.com --solution "My Solution Name"
 # or using the short form
 dotnet run -- https://yourorg.crm.dynamics.com -s MySolutionUniqueName
+```
+
+**Specify multiple solutions to check:**
+```bash
+dotnet run -- https://yourorg.crm.dynamics.com -s "Solution1,Solution2,Solution3"
 ```
 
 **Running interactively (prompts for URL):**
@@ -103,11 +108,19 @@ dotnet run
    ----------------------------
      1. Contoso Core Solution (contoso_core) - v1.0.0.0
      2. Contoso Sales (contoso_sales) - v1.2.0.0
+     3. Contoso Service (contoso_service) - v1.1.0.0
 
-   Enter the number of the solution to check (or 0 to exit):
+   Enter solution number(s) to check (comma-separated, e.g., 1,3,5) or 0 to exit:
+   > 1,3
+
+   Selected 2 solution(s):
+     - Contoso Core Solution
+     - Contoso Service
    ```
 
-3. **Component Scanning**: After selecting a solution, the tool scans all components and checks for unmanaged layers.
+   You can select multiple solutions at once by entering a comma-separated list of numbers. All selected solutions will be processed in sequence.
+
+3. **Component Scanning**: After selecting solution(s), the tool scans all components and checks for unmanaged layers.
 
 4. **Layer Review**: For each component with an unmanaged layer, you'll see details like:
    ```
