@@ -551,76 +551,101 @@ class Program
 
         try
         {
-            // Get the Power Pages site component IDs from the managed solution
-            var componentObjectIds = powerPagesComponents
-                .Select(c => c.GetAttributeValue<Guid>("objectid"))
-                .Where(id => id != Guid.Empty)
-                .ToList();
-
-            if (componentObjectIds.Count == 0)
-                return unmanagedComponents;
-
-            // For Power Pages components, we need to check each component's layers individually
-            // using the msdyn_componentlayerdatasource virtual entity or RetrieveSolutionComponentLayers
-            int current = 0;
-            int total = componentObjectIds.Count;
-
-            foreach (var objectId in componentObjectIds)
+            // First, get the "Active Solution" ID - this is where unmanaged customizations are tracked
+            Console.Write("\r  Finding Active Solution...                              ");
+            var activeSolutionQuery = new QueryExpression("solution")
             {
-                current++;
-                if (current % 50 == 0 || current == total)
+                ColumnSet = new ColumnSet("solutionid"),
+                Criteria = new FilterExpression
                 {
-                    Console.Write($"\r  Checking component layers... ({current}/{total})    ");
-                }
-
-                try
-                {
-                    // Use the function to retrieve layers for this specific component
-                    var layersRequest = new OrganizationRequest("RetrieveSolutionComponentLayers")
+                    Conditions =
                     {
-                        Parameters =
-                        {
-                            { "SolutionComponentName", "powerpagesitecomponent" },
-                            { "ComponentId", objectId }
-                        }
-                    };
-
-                    var layersResponse = await Task.Run(() => _serviceClient!.Execute(layersRequest));
-
-                    if (layersResponse.Results.Contains("SolutionComponentLayers"))
-                    {
-                        var layers = layersResponse.Results["SolutionComponentLayers"] as EntityCollection;
-                        if (layers != null)
-                        {
-                            // Check if there's an Active (unmanaged) layer
-                            var hasActiveLayer = layers.Entities.Any(l =>
-                                l.GetAttributeValue<string>("msdyn_solutionname") == "Active");
-
-                            if (hasActiveLayer)
-                            {
-                                // Get the component details
-                                var ppComponent = await Task.Run(() => _serviceClient!.Retrieve(
-                                    "powerpagesitecomponent",
-                                    objectId,
-                                    new ColumnSet("powerpagesitecomponentid", "name", "powerpagesitecomponenttype",
-                                        "modifiedon", "modifiedby", "powerpagesiteid")));
-                                unmanagedComponents.Add(ppComponent);
-                            }
-                        }
+                        new ConditionExpression("friendlyname", ConditionOperator.Equal, "Active Solution")
                     }
-                }
-                catch (FaultException<OrganizationServiceFault>)
+                },
+                TopCount = 1
+            };
+
+            var activeSolutionResult = await Task.Run(() => _serviceClient!.RetrieveMultiple(activeSolutionQuery));
+            if (activeSolutionResult.Entities.Count == 0)
+            {
+                Console.WriteLine("\r  Active Solution not found.                              ");
+                return unmanagedComponents;
+            }
+
+            var activeSolutionId = activeSolutionResult.Entities[0].GetAttributeValue<Guid>("solutionid");
+            Console.WriteLine($"\r  Active Solution ID: {activeSolutionId}                   ");
+
+            // Query the powerpagecomponent table directly
+            // Components with solutionid = Active Solution AND ismanaged = true are unmanaged customizations
+            Console.Write("\r  Querying powerpagecomponent table...                    ");
+
+            var allPowerPageComponents = new List<Entity>();
+            var ppQuery = new QueryExpression("powerpagecomponent")
+            {
+                ColumnSet = new ColumnSet("powerpagecomponentid", "name", "powerpagecomponenttype",
+                    "solutionid", "ismanaged", "modifiedby", "modifiedon"),
+                Criteria = new FilterExpression
                 {
-                    // RetrieveSolutionComponentLayers might not be available, try alternative method
-                    // Skip this component
-                }
-                catch
+                    Conditions =
+                    {
+                        new ConditionExpression("solutionid", ConditionOperator.Equal, activeSolutionId),
+                        new ConditionExpression("ismanaged", ConditionOperator.Equal, true)
+                    }
+                },
+                PageInfo = new PagingInfo { Count = 5000, PageNumber = 1 }
+            };
+
+            int pageNumber = 1;
+            while (true)
+            {
+                Console.Write($"\r  Querying powerpagecomponent... (page {pageNumber}, {allPowerPageComponents.Count} found)    ");
+                var results = await Task.Run(() => _serviceClient!.RetrieveMultiple(ppQuery));
+                allPowerPageComponents.AddRange(results.Entities);
+
+                if (results.MoreRecords)
                 {
-                    // Component might not exist or we don't have access
+                    ppQuery.PageInfo.PageNumber++;
+                    ppQuery.PageInfo.PagingCookie = results.PagingCookie;
+                    pageNumber++;
+                }
+                else
+                {
+                    break;
                 }
             }
 
-            Console.WriteLine($"\r  Checking component layers... done ({unmanagedComponents.Count} with Active layer)    ");
+            Console.WriteLine($"\r  Found {allPowerPageComponents.Count} Power Pages components with unmanaged layers.          ");
+
+            // Get the component IDs from the managed solution we're checking
+            var solutionComponentIds = new HashSet<Guid>(
+                powerPagesComponents
+                    .Select(c => c.GetAttributeValue<Guid>("objectid"))
+                    .Where(id => id != Guid.Empty)
+            );
+
+            // Filter to only components that are in our target solution
+            // Note: The powerpagecomponent records in Active Solution represent unmanaged customizations
+            // We need to match them to the solution components we're looking at
+            foreach (var ppComp in allPowerPageComponents)
+            {
+                var ppId = ppComp.GetAttributeValue<Guid>("powerpagecomponentid");
+
+                // Check if this component is in our solution's component list
+                if (solutionComponentIds.Contains(ppId))
+                {
+                    unmanagedComponents.Add(ppComp);
+                }
+            }
+
+            // If no matches by ID, the unmanaged components might all be relevant for the solution
+            // In that case, return all found components
+            if (unmanagedComponents.Count == 0 && allPowerPageComponents.Count > 0)
+            {
+                Console.WriteLine($"  Note: Found {allPowerPageComponents.Count} total unmanaged Power Pages components in environment.");
+                Console.WriteLine("  Showing all unmanaged Power Pages components (not filtered by solution):");
+                unmanagedComponents = allPowerPageComponents;
+            }
         }
         catch (Exception ex)
         {
@@ -639,13 +664,15 @@ class Program
         Console.WriteLine("===========================================");
 
         string componentName = ppComponent.GetAttributeValue<string>("name") ?? "Unknown";
-        var componentType = ppComponent.GetAttributeValue<OptionSetValue>("powerpagesitecomponenttype");
+        var componentType = ppComponent.GetAttributeValue<OptionSetValue>("powerpagecomponenttype");
         string componentTypeName = componentType != null ? GetPowerPagesComponentTypeName(componentType.Value) : "Unknown";
         DateTime? modifiedOn = ppComponent.GetAttributeValue<DateTime?>("modifiedon");
         var modifiedByRef = ppComponent.GetAttributeValue<EntityReference>("modifiedby");
         string modifiedBy = modifiedByRef?.Name ?? "Unknown";
+        var componentId = ppComponent.GetAttributeValue<Guid>("powerpagecomponentid");
 
         Console.WriteLine($"  Component Name:  {componentName}");
+        Console.WriteLine($"  Component ID:    {componentId}");
         Console.WriteLine($"  Component Type:  {componentTypeName}");
         Console.WriteLine($"  Modified On:     {modifiedOn?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A"}");
         Console.WriteLine($"  Modified By:     {modifiedBy}");
@@ -654,30 +681,39 @@ class Program
 
     private static string GetPowerPagesComponentTypeName(int componentType)
     {
+        // Map based on Power Pages component types
         return componentType switch
         {
-            1 => "Web Page",
-            2 => "Web File",
-            3 => "Web Link Set",
-            4 => "Web Link",
-            5 => "Page Template",
-            6 => "Content Snippet",
-            7 => "Web Template",
-            8 => "Site Setting",
-            9 => "Site Marker",
-            10 => "Entity Form",
-            11 => "Entity List",
-            12 => "Web Form",
-            13 => "Web Form Step",
-            14 => "Web Form Metadata",
-            15 => "Poll",
-            16 => "Poll Option",
-            17 => "Publishing State",
-            18 => "Published State Transition",
-            19 => "Web Role",
-            20 => "Column Permission",
-            21 => "Column Permission Profile",
-            22 => "Table Permission",
+            1 => "Publishing State",
+            2 => "Web Page",
+            3 => "Web File",
+            4 => "Web Link Set",
+            5 => "Web Link",
+            6 => "Page Template",
+            7 => "Content Snippet",
+            8 => "Web Template",
+            9 => "Site Setting",
+            10 => "Web Page Access Control Rule",
+            11 => "Web Role",
+            12 => "Website Access",
+            13 => "Site Marker",
+            15 => "Basic Form",
+            16 => "Basic Form Metadata",
+            17 => "List",
+            18 => "Table Permission",
+            19 => "Advanced Form",
+            20 => "Advanced Form Step",
+            21 => "Advanced Form Metadata",
+            24 => "Poll Placement",
+            26 => "Ad Placement",
+            27 => "Bot Consumer",
+            28 => "Column Permission Profile",
+            29 => "Column Permission",
+            30 => "Redirect",
+            31 => "Publishing State Transition Rule",
+            32 => "Shortcut",
+            33 => "Cloud Flow",
+            34 => "UX Component",
             _ => $"Type {componentType}"
         };
     }
@@ -686,17 +722,18 @@ class Program
     {
         try
         {
-            var componentId = ppComponent.GetAttributeValue<Guid>("powerpagesitecomponentid");
+            var componentId = ppComponent.GetAttributeValue<Guid>("powerpagecomponentid");
 
             Console.WriteLine("Removing Power Pages unmanaged customization...");
 
-            // Use RemoveActiveCustomizations to remove the unmanaged layer
-            var request = new OrganizationRequest("RemoveActiveCustomizations")
+            // Use RemoveActiveCustomization to remove the unmanaged layer
+            // Note: The logical name is "powerpagecomponent" (not "powerpagesitecomponent")
+            var request = new OrganizationRequest("RemoveActiveCustomization")
             {
                 Parameters =
                 {
-                    { "SolutionComponentName", "powerpagesitecomponent" },
-                    { "ComponentId", componentId }
+                    { "LogicalName", "powerpagecomponent" },
+                    { "Id", componentId }
                 }
             };
 

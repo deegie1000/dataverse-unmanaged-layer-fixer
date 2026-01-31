@@ -143,19 +143,21 @@ dotnet run
 
 ## Power Pages Support
 
-Power Pages site components (web pages, web templates, content snippets, etc.) don't use the standard `msdyn_componentlayer` table for tracking customizations. Instead, this tool:
+Power Pages components don't use the standard `msdyn_componentlayer` table for tracking customizations. Instead, unmanaged customizations are tracked in the `powerpagecomponent` table with a reference to the "Active Solution". This tool:
 
-1. Identifies Power Pages components in the solution (component types 10295, 10296, 10297)
-2. Checks the **Default solution** for unmanaged customization records
-3. Displays Power Pages-specific information (component type name, modified by/on)
-4. Uses `RemoveActiveCustomizations` to remove the unmanaged layer
+1. Finds the "Active Solution" in the environment (a special system solution)
+2. Queries the `powerpagecomponent` table for records where `solutionid = Active Solution ID` AND `ismanaged = true`
+3. These records represent unmanaged customizations on managed Power Pages components
+4. Displays component details (name, type, modified by/on)
+5. Uses `RemoveActiveCustomization` API to remove the unmanaged layer
 
 Power Pages component types detected:
-- Web Page, Web File, Web Link Set, Web Link
-- Page Template, Content Snippet, Web Template
-- Site Setting, Site Marker
-- Entity Form, Entity List, Web Form
-- Web Role, Table Permission, and more
+- Publishing State, Web Page, Web File
+- Web Link Set, Web Link, Page Template
+- Content Snippet, Web Template, Site Setting
+- Web Page Access Control Rule, Web Role, Website Access
+- Site Marker, Basic Form, List
+- Table Permission, Advanced Form, and more
 
 ## Important Notes
 
