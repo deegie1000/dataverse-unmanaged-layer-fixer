@@ -9,6 +9,7 @@ using System.Net.Http.Headers;
 using System.ServiceModel;
 using System.Text.Json;
 using System.Windows.Forms;
+using System.Xml.Linq;
 
 namespace DataverseUnmanagedLayerFixer;
 
@@ -22,7 +23,8 @@ record ComponentResult(
     DateTime? ModifiedOn,
     string ModifiedBy,
     bool WasRemoved,
-    string RemovalStatus
+    string RemovalStatus,
+    string DiffDetails = ""
 );
 
 class Program
@@ -103,6 +105,16 @@ class Program
                 Console.WriteLine("Running in export-only mode - no layers will be removed.");
             }
 
+            // Ask if user wants to see layer differences
+            Console.Write("Show layer differences for forms/views? (y/n): ");
+            string? showDiffsResponse = Console.ReadLine()?.Trim().ToLower();
+            bool showDiffs = showDiffsResponse == "y" || showDiffsResponse == "yes";
+
+            if (showDiffs)
+            {
+                Console.WriteLine("Layer differences will be calculated for forms and views.");
+            }
+
             // Process all selected solutions
             for (int i = 0; i < selectedSolutions.Count; i++)
             {
@@ -115,7 +127,7 @@ class Program
                     Console.WriteLine($"========== Processing solution {i + 1} of {selectedSolutions.Count} ==========");
                 }
 
-                var results = await ProcessSolutionComponentsAsync(solution, exportOnly);
+                var results = await ProcessSolutionComponentsAsync(solution, exportOnly, showDiffs);
 
                 if (results.Count > 0)
                 {
@@ -398,7 +410,7 @@ class Program
         }
     }
 
-    private static async Task<List<ComponentResult>> ProcessSolutionComponentsAsync(Entity solution, bool exportOnly = false)
+    private static async Task<List<ComponentResult>> ProcessSolutionComponentsAsync(Entity solution, bool exportOnly = false, bool showDiffs = false)
     {
         Guid solutionId = solution.GetAttributeValue<Guid>("solutionid");
         string solutionName = solution.GetAttributeValue<string>("friendlyname") ?? "Unknown";
@@ -580,6 +592,17 @@ class Program
                 }
             }
 
+            // Calculate diff details if requested
+            string diffDetails = "";
+            if (showDiffs)
+            {
+                var parsedId = Guid.TryParse(componentId, out var compId) ? compId : Guid.Empty;
+                if (parsedId != Guid.Empty)
+                {
+                    diffDetails = await GetComponentDiffAsync(componentType, parsedId, entityName);
+                }
+            }
+
             // Track result for export
             componentResults.Add(new ComponentResult(
                 ComponentName: componentName,
@@ -590,7 +613,8 @@ class Program
                 ModifiedOn: modifiedOn,
                 ModifiedBy: modifiedBy,
                 WasRemoved: wasRemoved,
-                RemovalStatus: removalStatus
+                RemovalStatus: removalStatus,
+                DiffDetails: diffDetails
             ));
         }
 
@@ -701,6 +725,13 @@ class Program
                 }
             }
 
+            // Calculate diff for Power Pages (limited - just note that it has unmanaged customizations)
+            string diffDetails = "";
+            if (showDiffs)
+            {
+                diffDetails = await GetPowerPagesDiffAsync(ppComponent);
+            }
+
             // Track result for export
             componentResults.Add(new ComponentResult(
                 ComponentName: componentName,
@@ -711,7 +742,8 @@ class Program
                 ModifiedOn: modifiedOn,
                 ModifiedBy: modifiedBy,
                 WasRemoved: wasRemoved,
-                RemovalStatus: removalStatus
+                RemovalStatus: removalStatus,
+                DiffDetails: diffDetails
             ));
         }
 
@@ -1932,18 +1964,27 @@ class Program
             // Create a single Details worksheet with all components
             var detailsSheet = workbook.Worksheets.Add("Details");
 
+            // Check if any results have diff details
+            bool hasDiffDetails = allResults.Values.SelectMany(r => r).Any(r => !string.IsNullOrEmpty(r.DiffDetails));
+
             // Add title
             detailsSheet.Cell(1, 1).Value = "Unmanaged Customizations Report - All Components";
             detailsSheet.Cell(1, 1).Style.Font.Bold = true;
             detailsSheet.Cell(1, 1).Style.Font.FontSize = 14;
-            detailsSheet.Range(1, 1, 1, 9).Merge();
+            detailsSheet.Range(1, 1, 1, hasDiffDetails ? 10 : 9).Merge();
 
             detailsSheet.Cell(2, 1).Value = $"Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
-            detailsSheet.Range(2, 1, 2, 9).Merge();
+            detailsSheet.Range(2, 1, 2, hasDiffDetails ? 10 : 9).Merge();
 
-            // Add headers (including Solution column)
+            // Add headers (including Solution column and optionally Component Details)
             int headerRow = 4;
-            var headers = new[] { "Solution", "Component Name", "Component Type", "Component ID", "Entity", "Solution Layer", "Modified On", "Modified By", "Removal Status" };
+            var headersList = new List<string> { "Solution", "Component Name", "Component Type", "Component ID", "Entity", "Solution Layer", "Modified On", "Modified By", "Removal Status" };
+            if (hasDiffDetails)
+            {
+                headersList.Add("Component Details");
+            }
+            var headers = headersList.ToArray();
+
             for (int i = 0; i < headers.Length; i++)
             {
                 detailsSheet.Cell(headerRow, i + 1).Value = headers[i];
@@ -1968,6 +2009,12 @@ class Program
                     detailsSheet.Cell(dataRow, 8).Value = result.ModifiedBy;
                     detailsSheet.Cell(dataRow, 9).Value = result.RemovalStatus;
 
+                    // Add diff details if available
+                    if (hasDiffDetails)
+                    {
+                        detailsSheet.Cell(dataRow, 10).Value = result.DiffDetails;
+                    }
+
                     // Color-code the removal status
                     var statusCell = detailsSheet.Cell(dataRow, 9);
                     if (result.RemovalStatus == "Removed")
@@ -1990,6 +2037,17 @@ class Program
             // Auto-fit columns on details sheet
             detailsSheet.Columns().AdjustToContents();
 
+            // Set max width for Component Details column to avoid very wide columns
+            if (hasDiffDetails)
+            {
+                var detailsColumn = detailsSheet.Column(10);
+                if (detailsColumn.Width > 80)
+                {
+                    detailsColumn.Width = 80;
+                    detailsColumn.Style.Alignment.WrapText = true;
+                }
+            }
+
             // Save the file
             workbook.SaveAs(filePath);
 
@@ -1999,6 +2057,521 @@ class Program
         catch (Exception ex)
         {
             Console.WriteLine($"Error exporting to Excel: {ex.Message}");
+        }
+    }
+
+    // ============================================================
+    // Layer Diff Calculation Methods
+    // ============================================================
+
+    private static async Task<string> GetComponentDiffAsync(int componentType, Guid componentId, string entityName)
+    {
+        try
+        {
+            return componentType switch
+            {
+                60 => await GetFormDiffAsync(componentId),      // System Form
+                26 => await GetViewDiffAsync(componentId),      // Saved Query (View)
+                59 => await GetChartDiffAsync(componentId),     // Chart
+                2 => await GetAttributeDiffAsync(componentId, entityName),  // Attribute
+                61 => await GetWebResourceDiffAsync(componentId), // Web Resource
+                29 => await GetWorkflowDiffAsync(componentId),  // Workflow
+                _ => "Diff not available for this component type"
+            };
+        }
+        catch (Exception ex)
+        {
+            return $"Error calculating diff: {ex.Message}";
+        }
+    }
+
+    private static async Task<string> GetFormDiffAsync(Guid formId)
+    {
+        try
+        {
+            // Retrieve the form with its XML
+            var form = await Task.Run(() => _serviceClient!.Retrieve("systemform", formId,
+                new ColumnSet("name", "formxml", "type", "objecttypecode", "ismanaged")));
+
+            var formXml = form.GetAttributeValue<string>("formxml");
+            var formName = form.GetAttributeValue<string>("name") ?? "Unknown";
+            var entityName = form.GetAttributeValue<string>("objecttypecode") ?? "Unknown";
+            var isManaged = form.GetAttributeValue<bool>("ismanaged");
+
+            if (string.IsNullOrEmpty(formXml))
+            {
+                return "Form XML not available";
+            }
+
+            // Parse the form XML and extract key information
+            var diffItems = new List<string>();
+
+            try
+            {
+                var doc = XDocument.Parse(formXml);
+
+                // Count tabs
+                var tabs = doc.Descendants("tab").ToList();
+                diffItems.Add($"Tabs: {tabs.Count}");
+
+                // Count sections
+                var sections = doc.Descendants("section").ToList();
+                diffItems.Add($"Sections: {sections.Count}");
+
+                // Count controls/fields
+                var controls = doc.Descendants("control").ToList();
+                diffItems.Add($"Controls: {controls.Count}");
+
+                // List field names
+                var fieldNames = controls
+                    .Select(c => c.Attribute("datafieldname")?.Value)
+                    .Where(n => !string.IsNullOrEmpty(n))
+                    .Distinct()
+                    .ToList();
+                if (fieldNames.Count > 0)
+                {
+                    var displayFields = fieldNames.Take(10).ToList();
+                    var fieldsStr = string.Join(", ", displayFields);
+                    if (fieldNames.Count > 10)
+                    {
+                        fieldsStr += $" (+{fieldNames.Count - 10} more)";
+                    }
+                    diffItems.Add($"Fields: {fieldsStr}");
+                }
+
+                // Check for subgrids
+                var subgrids = controls.Where(c => c.Attribute("classid")?.Value?.ToLower().Contains("subgrid") == true).ToList();
+                if (subgrids.Count > 0)
+                {
+                    diffItems.Add($"Subgrids: {subgrids.Count}");
+                }
+
+                // Check for web resources
+                var webResources = controls.Where(c => c.Attribute("classid")?.Value?.ToLower().Contains("webresource") == true).ToList();
+                if (webResources.Count > 0)
+                {
+                    diffItems.Add($"Web Resources: {webResources.Count}");
+                }
+
+                // Check for business rules
+                var events = doc.Descendants("event").ToList();
+                if (events.Count > 0)
+                {
+                    diffItems.Add($"Events/Scripts: {events.Count}");
+                }
+            }
+            catch
+            {
+                diffItems.Add("Could not parse form XML structure");
+            }
+
+            return string.Join("; ", diffItems);
+        }
+        catch (Exception ex)
+        {
+            return $"Error retrieving form: {ex.Message}";
+        }
+    }
+
+    private static async Task<string> GetViewDiffAsync(Guid viewId)
+    {
+        try
+        {
+            // Retrieve the view with its XML
+            var view = await Task.Run(() => _serviceClient!.Retrieve("savedquery", viewId,
+                new ColumnSet("name", "fetchxml", "layoutxml", "returnedtypecode", "ismanaged")));
+
+            var fetchXml = view.GetAttributeValue<string>("fetchxml");
+            var layoutXml = view.GetAttributeValue<string>("layoutxml");
+            var viewName = view.GetAttributeValue<string>("name") ?? "Unknown";
+
+            var diffItems = new List<string>();
+
+            // Parse FetchXML
+            if (!string.IsNullOrEmpty(fetchXml))
+            {
+                try
+                {
+                    var fetchDoc = XDocument.Parse(fetchXml);
+
+                    // Count attributes (columns in query)
+                    var attributes = fetchDoc.Descendants("attribute").ToList();
+                    diffItems.Add($"Query columns: {attributes.Count}");
+
+                    // Count filters
+                    var filters = fetchDoc.Descendants("filter").ToList();
+                    var conditions = fetchDoc.Descendants("condition").ToList();
+                    if (conditions.Count > 0)
+                    {
+                        diffItems.Add($"Filter conditions: {conditions.Count}");
+                    }
+
+                    // Count linked entities
+                    var linkEntities = fetchDoc.Descendants("link-entity").ToList();
+                    if (linkEntities.Count > 0)
+                    {
+                        diffItems.Add($"Linked entities: {linkEntities.Count}");
+                    }
+
+                    // Check for order by
+                    var orderBy = fetchDoc.Descendants("order").ToList();
+                    if (orderBy.Count > 0)
+                    {
+                        var orderFields = orderBy.Select(o => o.Attribute("attribute")?.Value).Where(a => a != null);
+                        diffItems.Add($"Sort by: {string.Join(", ", orderFields)}");
+                    }
+                }
+                catch
+                {
+                    diffItems.Add("Could not parse FetchXML");
+                }
+            }
+
+            // Parse LayoutXML
+            if (!string.IsNullOrEmpty(layoutXml))
+            {
+                try
+                {
+                    var layoutDoc = XDocument.Parse(layoutXml);
+
+                    // Count visible columns
+                    var cells = layoutDoc.Descendants("cell").ToList();
+                    diffItems.Add($"Visible columns: {cells.Count}");
+
+                    // List column names
+                    var columnNames = cells
+                        .Select(c => c.Attribute("name")?.Value)
+                        .Where(n => !string.IsNullOrEmpty(n))
+                        .ToList();
+                    if (columnNames.Count > 0)
+                    {
+                        var displayCols = columnNames.Take(8).ToList();
+                        var colsStr = string.Join(", ", displayCols);
+                        if (columnNames.Count > 8)
+                        {
+                            colsStr += $" (+{columnNames.Count - 8} more)";
+                        }
+                        diffItems.Add($"Columns: {colsStr}");
+                    }
+                }
+                catch
+                {
+                    diffItems.Add("Could not parse LayoutXML");
+                }
+            }
+
+            return diffItems.Count > 0 ? string.Join("; ", diffItems) : "No view details available";
+        }
+        catch (Exception ex)
+        {
+            return $"Error retrieving view: {ex.Message}";
+        }
+    }
+
+    private static async Task<string> GetChartDiffAsync(Guid chartId)
+    {
+        try
+        {
+            var chart = await Task.Run(() => _serviceClient!.Retrieve("savedqueryvisualization", chartId,
+                new ColumnSet("name", "datadescription", "presentationdescription", "primaryentitytypecode")));
+
+            var dataDesc = chart.GetAttributeValue<string>("datadescription");
+            var presDesc = chart.GetAttributeValue<string>("presentationdescription");
+            var chartName = chart.GetAttributeValue<string>("name") ?? "Unknown";
+
+            var diffItems = new List<string>();
+
+            // Parse data description
+            if (!string.IsNullOrEmpty(dataDesc))
+            {
+                try
+                {
+                    var dataDoc = XDocument.Parse(dataDesc);
+                    var measures = dataDoc.Descendants("measure").ToList();
+                    var categories = dataDoc.Descendants("category").ToList();
+
+                    if (measures.Count > 0)
+                    {
+                        diffItems.Add($"Measures: {measures.Count}");
+                    }
+                    if (categories.Count > 0)
+                    {
+                        var catAliases = categories.Select(c => c.Attribute("alias")?.Value).Where(a => a != null);
+                        diffItems.Add($"Categories: {string.Join(", ", catAliases)}");
+                    }
+                }
+                catch
+                {
+                    diffItems.Add("Could not parse chart data description");
+                }
+            }
+
+            // Parse presentation description for chart type
+            if (!string.IsNullOrEmpty(presDesc))
+            {
+                try
+                {
+                    var presDoc = XDocument.Parse(presDesc);
+                    var chartType = presDoc.Descendants("Chart").FirstOrDefault()?.Element("Series")?.Element("Series")?.Attribute("ChartType")?.Value;
+                    if (!string.IsNullOrEmpty(chartType))
+                    {
+                        diffItems.Add($"Chart type: {chartType}");
+                    }
+                }
+                catch
+                {
+                    // Ignore presentation parsing errors
+                }
+            }
+
+            return diffItems.Count > 0 ? string.Join("; ", diffItems) : "Chart visualization";
+        }
+        catch (Exception ex)
+        {
+            return $"Error retrieving chart: {ex.Message}";
+        }
+    }
+
+    private static async Task<string> GetAttributeDiffAsync(Guid attributeMetadataId, string entityName)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(entityName))
+            {
+                return "Entity name not available for attribute diff";
+            }
+
+            // Retrieve entity metadata with attributes to find this specific attribute
+            var request = new RetrieveEntityRequest
+            {
+                LogicalName = entityName,
+                EntityFilters = EntityFilters.Attributes,
+                RetrieveAsIfPublished = false
+            };
+
+            var response = await Task.Run(() => (RetrieveEntityResponse)_serviceClient!.Execute(request));
+
+            var attribute = response.EntityMetadata.Attributes
+                .FirstOrDefault(a => a.MetadataId == attributeMetadataId);
+
+            if (attribute == null)
+            {
+                return "Attribute not found in entity metadata";
+            }
+
+            var diffItems = new List<string>();
+
+            // Basic info
+            diffItems.Add($"Logical name: {attribute.LogicalName}");
+            diffItems.Add($"Type: {attribute.AttributeType}");
+
+            // Display name
+            if (attribute.DisplayName?.UserLocalizedLabel?.Label != null)
+            {
+                diffItems.Add($"Display: {attribute.DisplayName.UserLocalizedLabel.Label}");
+            }
+
+            // Requirement level
+            if (attribute.RequiredLevel?.Value != null)
+            {
+                diffItems.Add($"Required: {attribute.RequiredLevel.Value}");
+            }
+
+            // Type-specific info
+            switch (attribute)
+            {
+                case StringAttributeMetadata strAttr:
+                    diffItems.Add($"Max length: {strAttr.MaxLength}");
+                    if (strAttr.Format != null)
+                        diffItems.Add($"Format: {strAttr.Format}");
+                    break;
+
+                case IntegerAttributeMetadata intAttr:
+                    diffItems.Add($"Range: {intAttr.MinValue} - {intAttr.MaxValue}");
+                    break;
+
+                case DecimalAttributeMetadata decAttr:
+                    diffItems.Add($"Precision: {decAttr.Precision}");
+                    diffItems.Add($"Range: {decAttr.MinValue} - {decAttr.MaxValue}");
+                    break;
+
+                case MoneyAttributeMetadata moneyAttr:
+                    diffItems.Add($"Precision: {moneyAttr.Precision}");
+                    break;
+
+                case PicklistAttributeMetadata picklistAttr:
+                    var optionCount = picklistAttr.OptionSet?.Options?.Count ?? 0;
+                    diffItems.Add($"Options: {optionCount}");
+                    break;
+
+                case LookupAttributeMetadata lookupAttr:
+                    var targets = lookupAttr.Targets != null ? string.Join(", ", lookupAttr.Targets) : "Unknown";
+                    diffItems.Add($"Targets: {targets}");
+                    break;
+
+                case DateTimeAttributeMetadata dateAttr:
+                    if (dateAttr.Format != null)
+                        diffItems.Add($"Format: {dateAttr.Format}");
+                    break;
+            }
+
+            return string.Join("; ", diffItems);
+        }
+        catch (Exception ex)
+        {
+            return $"Error retrieving attribute: {ex.Message}";
+        }
+    }
+
+    private static async Task<string> GetWebResourceDiffAsync(Guid webResourceId)
+    {
+        try
+        {
+            var webResource = await Task.Run(() => _serviceClient!.Retrieve("webresource", webResourceId,
+                new ColumnSet("name", "webresourcetype", "displayname", "description")));
+
+            var name = webResource.GetAttributeValue<string>("name") ?? "Unknown";
+            var displayName = webResource.GetAttributeValue<string>("displayname");
+            var webResourceType = webResource.GetAttributeValue<OptionSetValue>("webresourcetype")?.Value ?? 0;
+
+            var typeName = webResourceType switch
+            {
+                1 => "HTML",
+                2 => "CSS",
+                3 => "JavaScript",
+                4 => "XML",
+                5 => "PNG",
+                6 => "JPG",
+                7 => "GIF",
+                8 => "Silverlight (XAP)",
+                9 => "Stylesheet (XSL)",
+                10 => "ICO",
+                11 => "Vector (SVG)",
+                12 => "RESX",
+                _ => $"Type {webResourceType}"
+            };
+
+            var diffItems = new List<string>
+            {
+                $"Name: {name}",
+                $"Type: {typeName}"
+            };
+
+            if (!string.IsNullOrEmpty(displayName))
+            {
+                diffItems.Add($"Display: {displayName}");
+            }
+
+            return string.Join("; ", diffItems);
+        }
+        catch (Exception ex)
+        {
+            return $"Error retrieving web resource: {ex.Message}";
+        }
+    }
+
+    private static async Task<string> GetWorkflowDiffAsync(Guid workflowId)
+    {
+        try
+        {
+            var workflow = await Task.Run(() => _serviceClient!.Retrieve("workflow", workflowId,
+                new ColumnSet("name", "category", "type", "scope", "mode", "primaryentity", "triggeroncreate", "triggeronupdate", "triggerondelete")));
+
+            var name = workflow.GetAttributeValue<string>("name") ?? "Unknown";
+            var category = workflow.GetAttributeValue<OptionSetValue>("category")?.Value ?? 0;
+            var type = workflow.GetAttributeValue<OptionSetValue>("type")?.Value ?? 0;
+            var scope = workflow.GetAttributeValue<OptionSetValue>("scope")?.Value ?? 0;
+            var mode = workflow.GetAttributeValue<OptionSetValue>("mode")?.Value ?? 0;
+            var primaryEntity = workflow.GetAttributeValue<string>("primaryentity") ?? "None";
+
+            var categoryName = category switch
+            {
+                0 => "Workflow",
+                1 => "Dialog",
+                2 => "Business Rule",
+                3 => "Action",
+                4 => "Business Process Flow",
+                5 => "Modern Flow",
+                6 => "Desktop Flow",
+                _ => $"Category {category}"
+            };
+
+            var scopeName = scope switch
+            {
+                1 => "User",
+                2 => "Business Unit",
+                3 => "Parent-Child Business Units",
+                4 => "Organization",
+                _ => $"Scope {scope}"
+            };
+
+            var modeName = mode switch
+            {
+                0 => "Background",
+                1 => "Real-time",
+                _ => $"Mode {mode}"
+            };
+
+            var diffItems = new List<string>
+            {
+                $"Category: {categoryName}",
+                $"Entity: {primaryEntity}",
+                $"Scope: {scopeName}",
+                $"Mode: {modeName}"
+            };
+
+            // Add trigger info
+            var triggers = new List<string>();
+            if (workflow.GetAttributeValue<bool>("triggeroncreate"))
+                triggers.Add("Create");
+            if (workflow.GetAttributeValue<bool>("triggeronupdate"))
+                triggers.Add("Update");
+            if (workflow.GetAttributeValue<bool>("triggerondelete"))
+                triggers.Add("Delete");
+
+            if (triggers.Count > 0)
+            {
+                diffItems.Add($"Triggers: {string.Join(", ", triggers)}");
+            }
+
+            return string.Join("; ", diffItems);
+        }
+        catch (Exception ex)
+        {
+            return $"Error retrieving workflow: {ex.Message}";
+        }
+    }
+
+    private static async Task<string> GetPowerPagesDiffAsync(Entity ppComponent)
+    {
+        try
+        {
+            var componentName = ppComponent.GetAttributeValue<string>("name") ?? "Unknown";
+            var componentType = ppComponent.GetAttributeValue<OptionSetValue>("powerpagecomponenttype")?.Value ?? 0;
+            var componentTypeName = GetPowerPagesComponentTypeName(componentType);
+
+            // For Power Pages, we can note that the component has been customized
+            // More detailed diff would require component-specific content analysis
+            var diffItems = new List<string>
+            {
+                $"Type: {componentTypeName}",
+                "Has unmanaged customizations in Active Solution"
+            };
+
+            // Check if the component has content we can analyze
+            var content = ppComponent.GetAttributeValue<string>("content");
+            if (!string.IsNullOrEmpty(content))
+            {
+                // Estimate content size
+                var sizeKb = content.Length / 1024.0;
+                diffItems.Add($"Content size: {sizeKb:F1} KB");
+            }
+
+            return await Task.FromResult(string.Join("; ", diffItems));
+        }
+        catch (Exception ex)
+        {
+            return $"Error analyzing Power Pages component: {ex.Message}";
         }
     }
 }
