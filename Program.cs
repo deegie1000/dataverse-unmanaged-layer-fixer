@@ -1,3 +1,4 @@
+using ClosedXML.Excel;
 using Microsoft.Crm.Sdk.Messages;
 using Microsoft.PowerPlatform.Dataverse.Client;
 using Microsoft.Xrm.Sdk;
@@ -9,6 +10,19 @@ using System.ServiceModel;
 using System.Text.Json;
 
 namespace DataverseUnmanagedLayerFixer;
+
+// Record to track component processing results for export
+record ComponentResult(
+    string ComponentName,
+    string ComponentType,
+    Guid ComponentId,
+    string EntityName,
+    string SolutionLayer,
+    DateTime? ModifiedOn,
+    string ModifiedBy,
+    bool WasRemoved,
+    string RemovalStatus
+);
 
 class Program
 {
@@ -231,10 +245,14 @@ class Program
     {
         Guid solutionId = solution.GetAttributeValue<Guid>("solutionid");
         string solutionName = solution.GetAttributeValue<string>("friendlyname") ?? "Unknown";
+        string solutionUniqueName = solution.GetAttributeValue<string>("uniquename") ?? "Unknown";
 
         Console.WriteLine();
         Console.WriteLine($"Processing solution: {solutionName}");
         Console.WriteLine("Fetching solution components...");
+
+        // Track all component results for export
+        var componentResults = new List<ComponentResult>();
 
         // Get all components in the solution with paging support
         var allComponents = await RetrieveAllComponentsAsync(solutionId);
@@ -309,108 +327,217 @@ class Program
 
         int layersRemoved = 0;
         bool removeAll = false;
+        bool skipAll = false;
 
         // Process standard component layers
         for (int i = 0; i < matchingLayers.Count; i++)
         {
             var (component, layer, logicalName) = matchingLayers[i];
             var componentType = component.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
+            var componentName = layer.GetAttributeValue<string>("msdyn_name") ?? "Unknown";
+            var componentId = layer.GetAttributeValue<string>("msdyn_componentid") ?? "";
+            var entityName = component.GetAttributeValue<string>("_entityname") ?? "";
+            var modifiedOn = layer.GetAttributeValue<DateTime?>("msdyn_overwritetime");
+            var modifiedBy = layer.GetAttributeValue<string>("msdyn_publishername") ?? "Unknown";
 
             DisplayLayerInfo(layer, componentType);
 
-            if (removeAll)
+            bool wasRemoved = false;
+            string removalStatus = "Skipped";
+
+            if (skipAll)
+            {
+                // Already skipping all - just record it
+                removalStatus = "Skipped (Skip All)";
+            }
+            else if (removeAll)
             {
                 Console.WriteLine("Auto-removing unmanaged layer...");
-                if (await RemoveUnmanagedLayerAsync(layer, logicalName))
+                wasRemoved = await RemoveUnmanagedLayerAsync(layer, logicalName);
+                if (wasRemoved)
+                {
                     layersRemoved++;
+                    removalStatus = "Removed";
+                }
+                else
+                {
+                    removalStatus = "Removal Failed";
+                }
                 Console.WriteLine();
-                continue;
-            }
-
-            Console.Write("Do you want to remove this unmanaged layer? (y/n/a=all/s=skip all): ");
-            string? response = Console.ReadLine()?.Trim().ToLower();
-
-            if (response == "s")
-            {
-                Console.WriteLine("Skipping remaining layers.");
-                break;
-            }
-
-            if (response == "a")
-            {
-                removeAll = true;
-                if (await RemoveUnmanagedLayerAsync(layer, logicalName))
-                    layersRemoved++;
-                Console.WriteLine();
-                continue;
-            }
-
-            if (response == "y")
-            {
-                if (await RemoveUnmanagedLayerAsync(layer, logicalName))
-                    layersRemoved++;
             }
             else
             {
-                Console.WriteLine("Skipped.");
+                Console.Write("Do you want to remove this unmanaged layer? (y/n/a=all/s=skip all): ");
+                string? response = Console.ReadLine()?.Trim().ToLower();
+
+                if (response == "s")
+                {
+                    Console.WriteLine("Skipping remaining layers.");
+                    skipAll = true;
+                    removalStatus = "Skipped (Skip All)";
+                }
+                else if (response == "a")
+                {
+                    removeAll = true;
+                    wasRemoved = await RemoveUnmanagedLayerAsync(layer, logicalName);
+                    if (wasRemoved)
+                    {
+                        layersRemoved++;
+                        removalStatus = "Removed";
+                    }
+                    else
+                    {
+                        removalStatus = "Removal Failed";
+                    }
+                    Console.WriteLine();
+                }
+                else if (response == "y")
+                {
+                    wasRemoved = await RemoveUnmanagedLayerAsync(layer, logicalName);
+                    if (wasRemoved)
+                    {
+                        layersRemoved++;
+                        removalStatus = "Removed";
+                    }
+                    else
+                    {
+                        removalStatus = "Removal Failed";
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("Skipped.");
+                    removalStatus = "Skipped";
+                }
+
+                Console.WriteLine();
             }
 
-            Console.WriteLine();
+            // Track result for export
+            componentResults.Add(new ComponentResult(
+                ComponentName: componentName,
+                ComponentType: GetComponentTypeName(componentType),
+                ComponentId: Guid.TryParse(componentId, out var id) ? id : Guid.Empty,
+                EntityName: entityName,
+                SolutionLayer: "Active",
+                ModifiedOn: modifiedOn,
+                ModifiedBy: modifiedBy,
+                WasRemoved: wasRemoved,
+                RemovalStatus: removalStatus
+            ));
         }
 
         // Process Power Pages components
         int powerPagesRemoved = 0;
-        if (unmanagedPowerPagesComponents.Count > 0 && !removeAll)
+        if (unmanagedPowerPagesComponents.Count > 0 && !skipAll)
         {
-            Console.WriteLine();
-            Console.WriteLine("===========================================");
-            Console.WriteLine("  POWER PAGES UNMANAGED CUSTOMIZATIONS");
-            Console.WriteLine("===========================================");
+            if (!removeAll)
+            {
+                Console.WriteLine();
+                Console.WriteLine("===========================================");
+                Console.WriteLine("  POWER PAGES UNMANAGED CUSTOMIZATIONS");
+                Console.WriteLine("===========================================");
+            }
         }
 
         for (int i = 0; i < unmanagedPowerPagesComponents.Count; i++)
         {
             var ppComponent = unmanagedPowerPagesComponents[i];
-            DisplayPowerPagesComponentInfo(ppComponent);
+            var componentName = ppComponent.GetAttributeValue<string>("name") ?? "Unknown";
+            var ppComponentType = ppComponent.GetAttributeValue<OptionSetValue>("powerpagecomponenttype");
+            var componentTypeName = ppComponentType != null ? GetPowerPagesComponentTypeName(ppComponentType.Value) : "Unknown";
+            var componentId = ppComponent.GetAttributeValue<Guid>("powerpagecomponentid");
+            var modifiedOn = ppComponent.GetAttributeValue<DateTime?>("modifiedon");
+            var modifiedByRef = ppComponent.GetAttributeValue<EntityReference>("modifiedby");
+            var modifiedBy = modifiedByRef?.Name ?? "Unknown";
 
-            if (removeAll)
+            bool wasRemoved = false;
+            string removalStatus = "Skipped";
+
+            if (skipAll)
             {
-                Console.WriteLine("Auto-removing Power Pages unmanaged customization...");
-                if (await RemovePowerPagesUnmanagedCustomizationAsync(ppComponent))
-                    powerPagesRemoved++;
-                Console.WriteLine();
-                continue;
-            }
-
-            Console.Write("Do you want to remove this unmanaged customization? (y/n/a=all/s=skip all): ");
-            string? response = Console.ReadLine()?.Trim().ToLower();
-
-            if (response == "s")
-            {
-                Console.WriteLine("Skipping remaining components.");
-                break;
-            }
-
-            if (response == "a")
-            {
-                removeAll = true;
-                if (await RemovePowerPagesUnmanagedCustomizationAsync(ppComponent))
-                    powerPagesRemoved++;
-                Console.WriteLine();
-                continue;
-            }
-
-            if (response == "y")
-            {
-                if (await RemovePowerPagesUnmanagedCustomizationAsync(ppComponent))
-                    powerPagesRemoved++;
+                removalStatus = "Skipped (Skip All)";
             }
             else
             {
-                Console.WriteLine("Skipped.");
+                DisplayPowerPagesComponentInfo(ppComponent);
+
+                if (removeAll)
+                {
+                    Console.WriteLine("Auto-removing Power Pages unmanaged customization...");
+                    wasRemoved = await RemovePowerPagesUnmanagedCustomizationAsync(ppComponent);
+                    if (wasRemoved)
+                    {
+                        powerPagesRemoved++;
+                        removalStatus = "Removed";
+                    }
+                    else
+                    {
+                        removalStatus = "Removal Failed";
+                    }
+                    Console.WriteLine();
+                }
+                else
+                {
+                    Console.Write("Do you want to remove this unmanaged customization? (y/n/a=all/s=skip all): ");
+                    string? response = Console.ReadLine()?.Trim().ToLower();
+
+                    if (response == "s")
+                    {
+                        Console.WriteLine("Skipping remaining components.");
+                        skipAll = true;
+                        removalStatus = "Skipped (Skip All)";
+                    }
+                    else if (response == "a")
+                    {
+                        removeAll = true;
+                        wasRemoved = await RemovePowerPagesUnmanagedCustomizationAsync(ppComponent);
+                        if (wasRemoved)
+                        {
+                            powerPagesRemoved++;
+                            removalStatus = "Removed";
+                        }
+                        else
+                        {
+                            removalStatus = "Removal Failed";
+                        }
+                        Console.WriteLine();
+                    }
+                    else if (response == "y")
+                    {
+                        wasRemoved = await RemovePowerPagesUnmanagedCustomizationAsync(ppComponent);
+                        if (wasRemoved)
+                        {
+                            powerPagesRemoved++;
+                            removalStatus = "Removed";
+                        }
+                        else
+                        {
+                            removalStatus = "Removal Failed";
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("Skipped.");
+                        removalStatus = "Skipped";
+                    }
+
+                    Console.WriteLine();
+                }
             }
 
-            Console.WriteLine();
+            // Track result for export
+            componentResults.Add(new ComponentResult(
+                ComponentName: componentName,
+                ComponentType: $"Power Pages - {componentTypeName}",
+                ComponentId: componentId,
+                EntityName: "",
+                SolutionLayer: "Active",
+                ModifiedOn: modifiedOn,
+                ModifiedBy: modifiedBy,
+                WasRemoved: wasRemoved,
+                RemovalStatus: removalStatus
+            ));
         }
 
         Console.WriteLine("-------------------------------------------");
@@ -418,6 +545,19 @@ class Program
         Console.WriteLine($"  Standard components with unmanaged layers: {matchingLayers.Count}");
         Console.WriteLine($"  Power Pages components with unmanaged customizations: {unmanagedPowerPagesComponents.Count}");
         Console.WriteLine($"  Total unmanaged layers removed: {layersRemoved + powerPagesRemoved}");
+
+        // Prompt for Excel export
+        if (componentResults.Count > 0)
+        {
+            Console.WriteLine();
+            Console.Write("Do you want to export results to Excel? (y/n): ");
+            string? exportResponse = Console.ReadLine()?.Trim().ToLower();
+
+            if (exportResponse == "y" || exportResponse == "yes")
+            {
+                ExportResultsToExcel(componentResults, solutionUniqueName, solutionName);
+            }
+        }
     }
 
     private static async Task<List<Entity>> RetrieveAllComponentsAsync(Guid solutionId)
@@ -1503,5 +1643,101 @@ class Program
             // Return null for unsupported/unknown types - they will be skipped
             _ => null
         };
+    }
+
+    private static void ExportResultsToExcel(List<ComponentResult> results, string solutionUniqueName, string solutionFriendlyName)
+    {
+        try
+        {
+            // Sanitize the solution name for use as a filename
+            var invalidChars = Path.GetInvalidFileNameChars();
+            var sanitizedName = new string(solutionUniqueName
+                .Select(c => invalidChars.Contains(c) ? '_' : c)
+                .ToArray());
+
+            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            var fileName = $"{sanitizedName}_UnmanagedLayers_{timestamp}.xlsx";
+
+            using var workbook = new XLWorkbook();
+            var worksheet = workbook.Worksheets.Add("Unmanaged Customizations");
+
+            // Add title
+            worksheet.Cell(1, 1).Value = $"Unmanaged Customizations Report - {solutionFriendlyName}";
+            worksheet.Cell(1, 1).Style.Font.Bold = true;
+            worksheet.Cell(1, 1).Style.Font.FontSize = 14;
+            worksheet.Range(1, 1, 1, 8).Merge();
+
+            worksheet.Cell(2, 1).Value = $"Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
+            worksheet.Range(2, 1, 2, 8).Merge();
+
+            // Add headers
+            int headerRow = 4;
+            var headers = new[] { "Component Name", "Component Type", "Component ID", "Entity", "Solution Layer", "Modified On", "Modified By", "Removal Status" };
+            for (int i = 0; i < headers.Length; i++)
+            {
+                worksheet.Cell(headerRow, i + 1).Value = headers[i];
+                worksheet.Cell(headerRow, i + 1).Style.Font.Bold = true;
+                worksheet.Cell(headerRow, i + 1).Style.Fill.BackgroundColor = XLColor.LightGray;
+                worksheet.Cell(headerRow, i + 1).Style.Border.BottomBorder = XLBorderStyleValues.Thin;
+            }
+
+            // Add data
+            int dataRow = headerRow + 1;
+            foreach (var result in results)
+            {
+                worksheet.Cell(dataRow, 1).Value = result.ComponentName;
+                worksheet.Cell(dataRow, 2).Value = result.ComponentType;
+                worksheet.Cell(dataRow, 3).Value = result.ComponentId.ToString();
+                worksheet.Cell(dataRow, 4).Value = result.EntityName;
+                worksheet.Cell(dataRow, 5).Value = result.SolutionLayer;
+                worksheet.Cell(dataRow, 6).Value = result.ModifiedOn?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A";
+                worksheet.Cell(dataRow, 7).Value = result.ModifiedBy;
+                worksheet.Cell(dataRow, 8).Value = result.RemovalStatus;
+
+                // Color-code the removal status
+                var statusCell = worksheet.Cell(dataRow, 8);
+                if (result.RemovalStatus == "Removed")
+                {
+                    statusCell.Style.Fill.BackgroundColor = XLColor.LightGreen;
+                }
+                else if (result.RemovalStatus == "Removal Failed")
+                {
+                    statusCell.Style.Fill.BackgroundColor = XLColor.LightCoral;
+                }
+                else
+                {
+                    statusCell.Style.Fill.BackgroundColor = XLColor.LightYellow;
+                }
+
+                dataRow++;
+            }
+
+            // Auto-fit columns
+            worksheet.Columns().AdjustToContents();
+
+            // Add summary
+            int summaryRow = dataRow + 2;
+            worksheet.Cell(summaryRow, 1).Value = "Summary:";
+            worksheet.Cell(summaryRow, 1).Style.Font.Bold = true;
+
+            int removedCount = results.Count(r => r.WasRemoved);
+            int skippedCount = results.Count(r => !r.WasRemoved && r.RemovalStatus != "Removal Failed");
+            int failedCount = results.Count(r => r.RemovalStatus == "Removal Failed");
+
+            worksheet.Cell(summaryRow + 1, 1).Value = $"Total Components: {results.Count}";
+            worksheet.Cell(summaryRow + 2, 1).Value = $"Removed: {removedCount}";
+            worksheet.Cell(summaryRow + 3, 1).Value = $"Skipped: {skippedCount}";
+            worksheet.Cell(summaryRow + 4, 1).Value = $"Failed: {failedCount}";
+
+            // Save the file
+            workbook.SaveAs(fileName);
+
+            Console.WriteLine();
+            Console.WriteLine($"Results exported to: {Path.GetFullPath(fileName)}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error exporting to Excel: {ex.Message}");
+        }
     }
 }

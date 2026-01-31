@@ -22,7 +22,8 @@ This tool:
    - Modified date
    - Publisher/modifier information
 7. **Prompts you to remove** unwanted unmanaged layers using the `RemoveActiveCustomizations` API
-8. **Allows processing multiple solutions** in a single session
+8. **Exports results to Excel** with component details and removal status
+9. **Allows processing multiple solutions** in a single session
 
 ## Prerequisites
 
@@ -156,7 +157,21 @@ dotnet run
      Total unmanaged layers removed: 3
    ```
 
-7. **Multiple Solutions**: After completing a solution, you'll be prompted:
+7. **Excel Export**: After processing, you'll be prompted to export results:
+   ```
+   Do you want to export results to Excel? (y/n): y
+   Results exported to: MySolution_UnmanagedLayers_20240115_143022.xlsx
+   ```
+
+   The Excel file includes:
+   - Component name, type, and ID
+   - Entity name (for entity subcomponents)
+   - Modified on/by information
+   - Removal status (Removed, Skipped, or Removal Failed)
+   - Color-coded status cells (green=removed, yellow=skipped, red=failed)
+   - Summary statistics
+
+8. **Multiple Solutions**: After completing a solution, you'll be prompted:
    ```
    Do you want to check another solution? (y/n):
    ```
