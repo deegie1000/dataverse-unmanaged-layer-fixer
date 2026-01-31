@@ -510,153 +510,120 @@ class Program
         List<Entity> components, Dictionary<Guid, string> entityMetadataMap)
     {
         var results = new List<(Entity Component, Entity Layer, string LogicalName)>();
-        var skippedTypes = new Dictionary<int, int>(); // Track skipped component types
-        var errorTypes = new Dictionary<int, int>(); // Track types that error on API call
-        int current = 0;
-        int total = components.Count;
-        int checkedCount = 0;
+
+        // Use the same approach as Power Pages: check Active Solution for unmanaged customizations
+        // Step 1: Find the "Active Solution"
+        Console.Write("\r  Finding Active Solution...                              ");
+        var activeSolutionQuery = new QueryExpression("solution")
+        {
+            ColumnSet = new ColumnSet("solutionid"),
+            Criteria = new FilterExpression
+            {
+                Conditions =
+                {
+                    new ConditionExpression("uniquename", ConditionOperator.Equal, "Active")
+                }
+            },
+            TopCount = 1
+        };
+
+        var activeSolutionResult = await Task.Run(() => _serviceClient!.RetrieveMultiple(activeSolutionQuery));
+        if (activeSolutionResult.Entities.Count == 0)
+        {
+            Console.WriteLine("\r  Active Solution not found.                              ");
+            return results;
+        }
+
+        var activeSolutionId = activeSolutionResult.Entities[0].GetAttributeValue<Guid>("solutionid");
+        Console.WriteLine($"\r  Active Solution ID: {activeSolutionId}                   ");
+
+        // Step 2: Get all components in the Active Solution (these are unmanaged customizations)
+        Console.Write("\r  Fetching Active Solution components...                  ");
+        var activeComponents = new HashSet<(Guid ObjectId, int ComponentType)>();
+
+        var activeComponentQuery = new QueryExpression("solutioncomponent")
+        {
+            ColumnSet = new ColumnSet("objectid", "componenttype"),
+            Criteria = new FilterExpression
+            {
+                Conditions =
+                {
+                    new ConditionExpression("solutionid", ConditionOperator.Equal, activeSolutionId)
+                }
+            },
+            PageInfo = new PagingInfo { Count = 5000, PageNumber = 1 }
+        };
+
+        int pageNumber = 1;
+        while (true)
+        {
+            Console.Write($"\r  Fetching Active Solution components... (page {pageNumber})    ");
+            var activeResult = await Task.Run(() => _serviceClient!.RetrieveMultiple(activeComponentQuery));
+
+            foreach (var comp in activeResult.Entities)
+            {
+                var objId = comp.GetAttributeValue<Guid>("objectid");
+                var compType = comp.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
+                if (objId != Guid.Empty)
+                {
+                    activeComponents.Add((objId, compType));
+                }
+            }
+
+            if (activeResult.MoreRecords)
+            {
+                activeComponentQuery.PageInfo.PageNumber++;
+                activeComponentQuery.PageInfo.PagingCookie = activeResult.PagingCookie;
+                pageNumber++;
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        Console.WriteLine($"\r  Found {activeComponents.Count} components in Active Solution.          ");
+
+        // Step 3: Cross-reference - find components that exist in both managed solution AND Active Solution
+        Console.Write("\r  Cross-referencing with managed solution components...   ");
+        int matchCount = 0;
 
         foreach (var component in components)
         {
-            current++;
-            if (current % 100 == 0 || current == total)
-            {
-                Console.Write($"\r  Checking component layers... ({current}/{total})    ");
-            }
-
             var objectId = component.GetAttributeValue<Guid>("objectid");
             var componentType = component.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
 
             if (objectId == Guid.Empty)
                 continue;
 
-            // Get the solution component logical name for this component type
-            string? componentLogicalName;
-
-            // For Entity (type 1), use the actual entity logical name from metadata
-            if (componentType == 1)
+            // Check if this component exists in the Active Solution (meaning it has unmanaged customizations)
+            if (activeComponents.Contains((objectId, componentType)))
             {
-                if (!entityMetadataMap.TryGetValue(objectId, out var entityName))
+                matchCount++;
+
+                // Get the logical name for removal
+                string? componentLogicalName;
+                if (componentType == 1)
                 {
-                    skippedTypes[componentType] = skippedTypes.GetValueOrDefault(componentType) + 1;
-                    continue;
-                }
-                componentLogicalName = entityName;
-            }
-            else
-            {
-                componentLogicalName = GetSolutionComponentLogicalName(componentType);
-            }
-
-            // Skip unsupported component types and track them
-            if (componentLogicalName == null)
-            {
-                skippedTypes[componentType] = skippedTypes.GetValueOrDefault(componentType) + 1;
-                continue;
-            }
-
-            checkedCount++;
-
-            try
-            {
-                // Query msdyn_componentlayer table directly via Web API
-                // Filter by componentid and look for Active layer
-                var apiUrl = $"/api/data/v9.2/msdyn_componentlayers?" +
-                    $"$filter=msdyn_componentid eq '{objectId}' and msdyn_solutionname eq 'Active'";
-
-                var response = await _httpClient!.GetAsync(apiUrl);
-
-                if (response.IsSuccessStatusCode)
-                {
-                    var jsonContent = await response.Content.ReadAsStringAsync();
-                    using var doc = JsonDocument.Parse(jsonContent);
-
-                    if (doc.RootElement.TryGetProperty("value", out var layersArray))
-                    {
-                        foreach (var layerJson in layersArray.EnumerateArray())
-                        {
-                            // Create an Entity to hold the layer data for display
-                            var activeLayer = new Entity("msdyn_componentlayer");
-                            activeLayer["msdyn_solutionname"] = "Active";
-
-                            if (layerJson.TryGetProperty("msdyn_name", out var nameProp))
-                                activeLayer["msdyn_name"] = nameProp.GetString();
-                            if (layerJson.TryGetProperty("msdyn_componentid", out var compIdProp))
-                                activeLayer["msdyn_componentid"] = compIdProp.GetString();
-                            if (layerJson.TryGetProperty("msdyn_order", out var orderProp))
-                                activeLayer["msdyn_order"] = orderProp.GetInt32();
-                            if (layerJson.TryGetProperty("msdyn_publishername", out var pubProp))
-                                activeLayer["msdyn_publishername"] = pubProp.GetString();
-                            if (layerJson.TryGetProperty("msdyn_overwritetime", out var timeProp))
-                            {
-                                if (DateTime.TryParse(timeProp.GetString(), out var overwriteTime))
-                                    activeLayer["msdyn_overwritetime"] = overwriteTime;
-                            }
-
-                            results.Add((component, activeLayer, componentLogicalName));
-                            break; // Only need the Active layer
-                        }
-                    }
+                    entityMetadataMap.TryGetValue(objectId, out componentLogicalName);
+                    componentLogicalName ??= "entity";
                 }
                 else
                 {
-                    errorTypes[componentType] = errorTypes.GetValueOrDefault(componentType) + 1;
-
-                    // Log first error of each type for debugging
-                    if (errorTypes[componentType] == 1)
-                    {
-                        var errorContent = await response.Content.ReadAsStringAsync();
-                        Console.WriteLine($"\n    [DEBUG] First error for type {componentType} ({componentLogicalName}): {response.StatusCode}");
-                        Console.WriteLine($"    URL: {apiUrl}");
-                        Console.WriteLine($"    Error: {errorContent.Substring(0, Math.Min(500, errorContent.Length))}");
-                    }
+                    componentLogicalName = GetSolutionComponentLogicalName(componentType) ?? "unknown";
                 }
-            }
-            catch (Exception ex)
-            {
-                // Skip errors
-                errorTypes[componentType] = errorTypes.GetValueOrDefault(componentType) + 1;
 
-                // Log first error of each type for debugging
-                if (errorTypes[componentType] == 1)
-                {
-                    Console.WriteLine($"\n    [DEBUG] First error for type {componentType}: {ex.Message}");
-                }
+                // Create a pseudo-layer entity for display
+                var activeLayer = new Entity("solutioncomponent");
+                activeLayer["msdyn_solutionname"] = "Active";
+                activeLayer["msdyn_componentid"] = objectId.ToString();
+                activeLayer["msdyn_name"] = $"{GetComponentTypeName(componentType)} - {objectId}";
+
+                results.Add((component, activeLayer, componentLogicalName));
             }
         }
 
-        Console.WriteLine($"\r  Checking component layers... done                                    ");
-        Console.WriteLine($"    Checked: {checkedCount}, Found with Active layer: {results.Count}");
-
-        // Report skipped types if any
-        if (skippedTypes.Count > 0)
-        {
-            int totalSkipped = skippedTypes.Values.Sum();
-            Console.WriteLine($"    Skipped {totalSkipped} components with unmapped types:");
-            foreach (var kvp in skippedTypes.OrderByDescending(x => x.Value).Take(5))
-            {
-                Console.WriteLine($"      - Type {kvp.Key} ({GetComponentTypeName(kvp.Key)}): {kvp.Value}");
-            }
-            if (skippedTypes.Count > 5)
-            {
-                Console.WriteLine($"      ... and {skippedTypes.Count - 5} more types");
-            }
-        }
-
-        // Report error types if any (usually means the API doesn't support that type)
-        if (errorTypes.Count > 0)
-        {
-            int totalErrors = errorTypes.Values.Sum();
-            Console.WriteLine($"    {totalErrors} components returned errors (API may not support these types):");
-            foreach (var kvp in errorTypes.OrderByDescending(x => x.Value).Take(5))
-            {
-                Console.WriteLine($"      - Type {kvp.Key} ({GetComponentTypeName(kvp.Key)}): {kvp.Value}");
-            }
-            if (errorTypes.Count > 5)
-            {
-                Console.WriteLine($"      ... and {errorTypes.Count - 5} more types");
-            }
-        }
+        Console.WriteLine($"\r  Found {matchCount} components with unmanaged customizations.          ");
 
         return results;
     }
