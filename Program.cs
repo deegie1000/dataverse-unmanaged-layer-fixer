@@ -219,22 +219,6 @@ class Program
 
         Console.WriteLine($"Found {allComponents.Count} components in the solution.");
 
-        // Build a set of component IDs for fast lookup
-        var componentIds = new HashSet<string>(
-            allComponents
-                .Select(c => c.GetAttributeValue<Guid>("objectid"))
-                .Where(id => id != Guid.Empty)
-                .Select(id => id.ToString().ToLowerInvariant())
-        );
-
-        // Build a lookup of component types by object ID
-        var componentTypeMap = allComponents
-            .Where(c => c.GetAttributeValue<Guid>("objectid") != Guid.Empty)
-            .ToDictionary(
-                c => c.GetAttributeValue<Guid>("objectid").ToString().ToLowerInvariant(),
-                c => c.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0
-            );
-
         // Debug: Show component type breakdown
         var componentTypeCounts = allComponents
             .GroupBy(c => c.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0)
@@ -247,84 +231,33 @@ class Program
         }
         Console.WriteLine();
 
-        Console.WriteLine("Fetching all Active (unmanaged) layers...");
-
-        // Fetch ALL Active layers at once (much faster than per-component queries)
-        var allActiveLayers = await RetrieveAllActiveLayersAsync();
-
-        Console.WriteLine($"Found {allActiveLayers.Count} total Active layers in the environment.");
-
-        // If no Active layers found, check if msdyn_componentlayer has ANY records
-        if (allActiveLayers.Count == 0)
-        {
-            Console.WriteLine("[DEBUG] Checking if msdyn_componentlayer table has any records...");
-            var anyLayersCount = await GetTotalLayerCountAsync();
-            Console.WriteLine($"[DEBUG] Total records in msdyn_componentlayer: {anyLayersCount}");
-
-            if (anyLayersCount == 0)
-            {
-                Console.WriteLine("[DEBUG] The msdyn_componentlayer table appears to be empty.");
-                Console.WriteLine("[DEBUG] This might be expected if Solution Layers feature is not enabled.");
-            }
-            else
-            {
-                Console.WriteLine("[DEBUG] There are layers, but none with solutionname='Active'.");
-                Console.WriteLine("[DEBUG] Checking what solution names exist...");
-                await ShowSampleLayerSolutionNamesAsync();
-            }
-        }
-
-        // Debug: Show sample component IDs from both sources to help identify format mismatches
-        if (allActiveLayers.Count > 0 && componentIds.Count > 0)
-        {
-            Console.WriteLine();
-            Console.WriteLine("[DEBUG] Sample solution component IDs (first 3):");
-            foreach (var id in componentIds.Take(3))
-            {
-                Console.WriteLine($"  - {id}");
-            }
-
-            Console.WriteLine("[DEBUG] Sample Active layer component IDs (first 5):");
-            foreach (var layer in allActiveLayers.Take(5))
-            {
-                var layerComponentId = layer.GetAttributeValue<string>("msdyn_componentid") ?? "null";
-                var layerName = layer.GetAttributeValue<string>("msdyn_name") ?? "Unknown";
-                Console.WriteLine($"  - {layerComponentId} ({layerName})");
-            }
-            Console.WriteLine();
-        }
-
-        // Filter to only layers that match our solution components
-        // Try matching with and without braces, and normalized to lowercase
-        var matchingLayers = allActiveLayers
-            .Where(layer =>
-            {
-                var componentId = layer.GetAttributeValue<string>("msdyn_componentid");
-                if (componentId == null) return false;
-
-                // Normalize: remove braces if present and convert to lowercase
-                var normalizedId = componentId.Trim().ToLowerInvariant();
-                if (normalizedId.StartsWith("{") && normalizedId.EndsWith("}"))
-                {
-                    normalizedId = normalizedId.Substring(1, normalizedId.Length - 2);
-                }
-
-                return componentIds.Contains(normalizedId);
-            })
-            .ToList();
-
-        Console.WriteLine($"Found {matchingLayers.Count} unmanaged layers for components in this solution.");
-
-        // Check for Power Pages site components (types 10295, 10296, 10297)
+        // Separate Power Pages components from standard components
         var powerPagesComponentTypes = new HashSet<int> { 10295, 10296, 10297 };
+        var standardComponents = allComponents
+            .Where(c => !powerPagesComponentTypes.Contains(c.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0))
+            .ToList();
         var powerPagesComponents = allComponents
             .Where(c => powerPagesComponentTypes.Contains(c.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0))
             .ToList();
 
+        Console.WriteLine($"  Standard components: {standardComponents.Count}");
+        Console.WriteLine($"  Power Pages components: {powerPagesComponents.Count}");
+        Console.WriteLine();
+
+        // Check standard components for unmanaged layers using RetrieveSolutionComponentLayers
+        var matchingLayers = new List<(Entity Component, Entity Layer)>();
+        if (standardComponents.Count > 0)
+        {
+            Console.WriteLine("Checking standard components for unmanaged layers...");
+            matchingLayers = await GetUnmanagedLayersForComponentsAsync(standardComponents);
+            Console.WriteLine($"Found {matchingLayers.Count} standard components with unmanaged layers.");
+        }
+
+        // Check Power Pages components
         List<Entity> unmanagedPowerPagesComponents = new();
         if (powerPagesComponents.Count > 0)
         {
-            Console.WriteLine($"Checking {powerPagesComponents.Count} Power Pages site components for unmanaged customizations...");
+            Console.WriteLine($"Checking {powerPagesComponents.Count} Power Pages components for unmanaged customizations...");
             unmanagedPowerPagesComponents = await GetUnmanagedPowerPagesComponentsAsync(powerPagesComponents);
             Console.WriteLine($"Found {unmanagedPowerPagesComponents.Count} Power Pages components with unmanaged customizations.");
         }
@@ -335,21 +268,17 @@ class Program
         if (totalUnmanagedCount == 0)
         {
             Console.WriteLine("No unmanaged layers found for this solution's components.");
-            Console.WriteLine();
-            Console.WriteLine("[DEBUG] This could mean:");
-            Console.WriteLine("  - The solution components have no unmanaged customizations");
-            Console.WriteLine("  - The component ID formats don't match between tables");
             return;
         }
 
         int layersRemoved = 0;
         bool removeAll = false;
 
+        // Process standard component layers
         for (int i = 0; i < matchingLayers.Count; i++)
         {
-            var layer = matchingLayers[i];
-            var componentId = layer.GetAttributeValue<string>("msdyn_componentid")?.ToLowerInvariant() ?? "";
-            var componentType = componentTypeMap.GetValueOrDefault(componentId, 0);
+            var (component, layer) = matchingLayers[i];
+            var componentType = component.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
 
             DisplayLayerInfo(layer, componentType);
 
@@ -500,49 +429,74 @@ class Program
         return allComponents;
     }
 
-    private static async Task<List<Entity>> RetrieveAllActiveLayersAsync()
+    private static async Task<List<(Entity Component, Entity Layer)>> GetUnmanagedLayersForComponentsAsync(
+        List<Entity> components)
     {
-        var allLayers = new List<Entity>();
+        var results = new List<(Entity Component, Entity Layer)>();
+        int current = 0;
+        int total = components.Count;
 
-        var layerQuery = new QueryExpression("msdyn_componentlayer")
+        foreach (var component in components)
         {
-            ColumnSet = new ColumnSet(true),
-            Criteria = new FilterExpression
+            current++;
+            if (current % 100 == 0 || current == total)
             {
-                Conditions =
+                Console.Write($"\r  Checking component layers... ({current}/{total})    ");
+            }
+
+            var objectId = component.GetAttributeValue<Guid>("objectid");
+            var componentType = component.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
+
+            if (objectId == Guid.Empty)
+                continue;
+
+            // Get the solution component logical name for this component type
+            var componentLogicalName = GetSolutionComponentLogicalName(componentType);
+
+            try
+            {
+                // Use RetrieveSolutionComponentLayers to check for Active layer
+                var layersRequest = new OrganizationRequest("RetrieveSolutionComponentLayers")
                 {
-                    new ConditionExpression("msdyn_solutionname", ConditionOperator.Equal, "Active")
+                    Parameters =
+                    {
+                        { "SolutionComponentName", componentLogicalName },
+                        { "ComponentId", objectId }
+                    }
+                };
+
+                var layersResponse = await Task.Run(() => _serviceClient!.Execute(layersRequest));
+
+                if (layersResponse.Results.Contains("SolutionComponentLayers"))
+                {
+                    var layers = layersResponse.Results["SolutionComponentLayers"] as EntityCollection;
+                    if (layers != null)
+                    {
+                        // Find the Active (unmanaged) layer
+                        var activeLayer = layers.Entities.FirstOrDefault(l =>
+                            l.GetAttributeValue<string>("msdyn_solutionname") == "Active");
+
+                        if (activeLayer != null)
+                        {
+                            results.Add((component, activeLayer));
+                        }
+                    }
                 }
-            },
-            PageInfo = new PagingInfo
-            {
-                Count = 5000,
-                PageNumber = 1,
-                ReturnTotalRecordCount = false
             }
-        };
-
-        int pageNumber = 1;
-        while (true)
-        {
-            Console.Write($"\r  Fetching Active layers... (page {pageNumber}, {allLayers.Count} found)    ");
-            var results = await Task.Run(() => _serviceClient!.RetrieveMultiple(layerQuery));
-            allLayers.AddRange(results.Entities);
-
-            if (results.MoreRecords)
+            catch (FaultException<OrganizationServiceFault>)
             {
-                layerQuery.PageInfo.PageNumber++;
-                layerQuery.PageInfo.PagingCookie = results.PagingCookie;
-                pageNumber++;
+                // This component type might not support RetrieveSolutionComponentLayers
+                // Skip silently
             }
-            else
+            catch
             {
-                break;
+                // Skip errors
             }
         }
-        Console.WriteLine($"\r  Fetching Active layers... done ({allLayers.Count} total)          ");
 
-        return allLayers;
+        Console.WriteLine($"\r  Checking component layers... done ({results.Count} with Active layer)          ");
+
+        return results;
     }
 
     private static async Task<List<Entity>> GetUnmanagedPowerPagesComponentsAsync(List<Entity> powerPagesComponents)
@@ -751,53 +705,6 @@ class Program
         {
             Console.WriteLine($"Error: {ex.Message}");
             return false;
-        }
-    }
-
-    private static async Task<int> GetTotalLayerCountAsync()
-    {
-        try
-        {
-            var countQuery = new QueryExpression("msdyn_componentlayer")
-            {
-                ColumnSet = new ColumnSet("msdyn_componentlayerid"),
-                PageInfo = new PagingInfo { Count = 1, PageNumber = 1, ReturnTotalRecordCount = true }
-            };
-
-            var results = await Task.Run(() => _serviceClient!.RetrieveMultiple(countQuery));
-            return results.TotalRecordCount > 0 ? results.TotalRecordCount : results.Entities.Count;
-        }
-        catch
-        {
-            return -1;
-        }
-    }
-
-    private static async Task ShowSampleLayerSolutionNamesAsync()
-    {
-        try
-        {
-            var query = new QueryExpression("msdyn_componentlayer")
-            {
-                ColumnSet = new ColumnSet("msdyn_solutionname", "msdyn_name"),
-                PageInfo = new PagingInfo { Count = 50, PageNumber = 1 }
-            };
-
-            var results = await Task.Run(() => _serviceClient!.RetrieveMultiple(query));
-            var solutionNames = results.Entities
-                .Select(e => e.GetAttributeValue<string>("msdyn_solutionname") ?? "null")
-                .Distinct()
-                .Take(10);
-
-            Console.WriteLine("[DEBUG] Sample solution names in msdyn_componentlayer:");
-            foreach (var name in solutionNames)
-            {
-                Console.WriteLine($"  - {name}");
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[DEBUG] Error querying layer solution names: {ex.Message}");
         }
     }
 
