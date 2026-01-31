@@ -132,19 +132,29 @@ dotnet run
    - After scanning, you're prompted to export results to Excel
    - This is useful for auditing or reporting without making any changes
 
-4. **Layer Differences**: You'll be asked if you want to see component details:
+4. **Layer Differences**: You'll be asked if you want to compare layers:
    ```
    Show layer differences for forms/views? (y/n): y
    Layer differences will be calculated for forms and views.
    ```
 
-   When enabled, the tool retrieves and analyzes component definitions to show:
-   - **Forms**: Tab count, section count, controls/fields, subgrids, web resources, events
-   - **Views**: Query columns, filter conditions, linked entities, sort order, visible columns
-   - **Charts**: Measures, categories, chart type
-   - **Attributes**: Logical name, type, display name, requirement level, type-specific properties (max length, precision, options, targets, etc.)
-   - **Web Resources**: Name, type (HTML, CSS, JavaScript, etc.)
-   - **Workflows**: Category, entity, scope, mode, triggers
+   When enabled, the tool **compares the Active (unmanaged) layer with the managed layer immediately below it** to show what was actually changed. The comparison retrieves the component definition from both layers and identifies:
+
+   - **Forms**: Added/removed tabs, sections, fields, controls; visibility changes; event handler changes
+   - **Views**: Added/removed query columns, filter condition changes, linked entity changes, sort order changes, visible column changes, column width changes
+   - **Charts**: Data definition changes, chart type/presentation changes
+   - **Other components**: Property additions, removals, and value modifications
+
+   Example output in the spreadsheet:
+   ```
+   [vs Contoso Solution] +Tabs: Summary; +Fields: new_customfield, new_rating; -Sections: 2; Filters: 3 → 5
+   ```
+
+   This shows the component was compared against the "Contoso Solution" managed layer and displays:
+   - `+Tabs: Summary` - A tab named "Summary" was added
+   - `+Fields: new_customfield, new_rating` - These fields were added to the form
+   - `-Sections: 2` - Two sections were removed
+   - `Filters: 3 → 5` - Filter conditions increased from 3 to 5
 
    This information is included in the Excel export as a "Component Details" column.
 
@@ -227,7 +237,7 @@ dotnet run
      - Modified on/by information
      - Removal status (Removed, Skipped, or Removal Failed)
      - Color-coded status cells (green=removed, yellow=skipped, red=failed)
-     - Component Details (if layer differences were enabled) - shows form fields, view columns, attribute properties, etc.
+     - Component Details (if layer differences were enabled) - shows the actual differences between the Active layer and managed layer (e.g., added/removed tabs, fields, filters)
 
 ## Power Pages Support
 

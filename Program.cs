@@ -2068,16 +2068,54 @@ class Program
     {
         try
         {
-            return componentType switch
+            // Get the logical name for the component type
+            var componentLogicalName = GetSolutionComponentLogicalName(componentType);
+            if (string.IsNullOrEmpty(componentLogicalName))
             {
-                60 => await GetFormDiffAsync(componentId),      // System Form
-                26 => await GetViewDiffAsync(componentId),      // Saved Query (View)
-                59 => await GetChartDiffAsync(componentId),     // Chart
-                2 => await GetAttributeDiffAsync(componentId, entityName),  // Attribute
-                61 => await GetWebResourceDiffAsync(componentId), // Web Resource
-                29 => await GetWorkflowDiffAsync(componentId),  // Workflow
-                _ => "Diff not available for this component type"
-            };
+                return "Layer diff not available for this component type";
+            }
+
+            // Use the Web API to retrieve solution component layers
+            var layers = await GetComponentLayersAsync(componentId, componentLogicalName);
+
+            if (layers == null || layers.Count == 0)
+            {
+                return "No layers found";
+            }
+
+            // Find the Active (unmanaged) layer and the managed layer below it
+            var activeLayer = layers.FirstOrDefault(l =>
+                l.GetAttributeValue<string>("msdyn_solutionname")?.Equals("Active", StringComparison.OrdinalIgnoreCase) == true);
+
+            var managedLayer = layers
+                .Where(l => l.GetAttributeValue<string>("msdyn_solutionname")?.Equals("Active", StringComparison.OrdinalIgnoreCase) != true)
+                .OrderByDescending(l => l.GetAttributeValue<int>("msdyn_order"))
+                .FirstOrDefault();
+
+            if (activeLayer == null)
+            {
+                return "Active layer not found";
+            }
+
+            if (managedLayer == null)
+            {
+                return "No managed layer to compare (component only exists in Active)";
+            }
+
+            var managedSolutionName = managedLayer.GetAttributeValue<string>("msdyn_solutionname") ?? "Unknown";
+
+            // Get the component JSON from both layers
+            var activeJson = activeLayer.GetAttributeValue<string>("msdyn_componentjson");
+            var managedJson = managedLayer.GetAttributeValue<string>("msdyn_componentjson");
+
+            if (string.IsNullOrEmpty(activeJson) && string.IsNullOrEmpty(managedJson))
+            {
+                // Fall back to component-specific comparison
+                return await GetComponentSpecificDiffAsync(componentType, componentId, entityName, managedSolutionName);
+            }
+
+            // Compare the JSON and extract differences
+            return CompareLayerJson(activeJson, managedJson, componentType, managedSolutionName);
         }
         catch (Exception ex)
         {
@@ -2085,263 +2123,535 @@ class Program
         }
     }
 
-    private static async Task<string> GetFormDiffAsync(Guid formId)
+    private static async Task<List<Entity>> GetComponentLayersAsync(Guid componentId, string componentLogicalName)
     {
         try
         {
-            // Retrieve the form with its XML
-            var form = await Task.Run(() => _serviceClient!.Retrieve("systemform", formId,
-                new ColumnSet("name", "formxml", "type", "objecttypecode", "ismanaged")));
-
-            var formXml = form.GetAttributeValue<string>("formxml");
-            var formName = form.GetAttributeValue<string>("name") ?? "Unknown";
-            var entityName = form.GetAttributeValue<string>("objecttypecode") ?? "Unknown";
-            var isManaged = form.GetAttributeValue<bool>("ismanaged");
-
-            if (string.IsNullOrEmpty(formXml))
+            // Query the msdyn_componentlayer table
+            var query = new QueryExpression("msdyn_componentlayer")
             {
-                return "Form XML not available";
-            }
-
-            // Parse the form XML and extract key information
-            var diffItems = new List<string>();
-
-            try
-            {
-                var doc = XDocument.Parse(formXml);
-
-                // Count tabs
-                var tabs = doc.Descendants("tab").ToList();
-                diffItems.Add($"Tabs: {tabs.Count}");
-
-                // Count sections
-                var sections = doc.Descendants("section").ToList();
-                diffItems.Add($"Sections: {sections.Count}");
-
-                // Count controls/fields
-                var controls = doc.Descendants("control").ToList();
-                diffItems.Add($"Controls: {controls.Count}");
-
-                // List field names
-                var fieldNames = controls
-                    .Select(c => c.Attribute("datafieldname")?.Value)
-                    .Where(n => !string.IsNullOrEmpty(n))
-                    .Distinct()
-                    .ToList();
-                if (fieldNames.Count > 0)
+                ColumnSet = new ColumnSet("msdyn_componentid", "msdyn_componentjson", "msdyn_solutionname",
+                    "msdyn_order", "msdyn_name", "msdyn_solutioncomponentname"),
+                Criteria = new FilterExpression
                 {
-                    var displayFields = fieldNames.Take(10).ToList();
-                    var fieldsStr = string.Join(", ", displayFields);
-                    if (fieldNames.Count > 10)
+                    Conditions =
                     {
-                        fieldsStr += $" (+{fieldNames.Count - 10} more)";
+                        new ConditionExpression("msdyn_componentid", ConditionOperator.Equal, componentId.ToString())
                     }
-                    diffItems.Add($"Fields: {fieldsStr}");
-                }
+                },
+                Orders = { new OrderExpression("msdyn_order", OrderType.Descending) }
+            };
 
-                // Check for subgrids
-                var subgrids = controls.Where(c => c.Attribute("classid")?.Value?.ToLower().Contains("subgrid") == true).ToList();
-                if (subgrids.Count > 0)
-                {
-                    diffItems.Add($"Subgrids: {subgrids.Count}");
-                }
-
-                // Check for web resources
-                var webResources = controls.Where(c => c.Attribute("classid")?.Value?.ToLower().Contains("webresource") == true).ToList();
-                if (webResources.Count > 0)
-                {
-                    diffItems.Add($"Web Resources: {webResources.Count}");
-                }
-
-                // Check for business rules
-                var events = doc.Descendants("event").ToList();
-                if (events.Count > 0)
-                {
-                    diffItems.Add($"Events/Scripts: {events.Count}");
-                }
-            }
-            catch
-            {
-                diffItems.Add("Could not parse form XML structure");
-            }
-
-            return string.Join("; ", diffItems);
+            var results = await Task.Run(() => _serviceClient!.RetrieveMultiple(query));
+            return results.Entities.ToList();
         }
-        catch (Exception ex)
+        catch
         {
-            return $"Error retrieving form: {ex.Message}";
+            // If direct query fails, try using RetrieveSolutionComponentLayers
+            return await GetLayersViaApiAsync(componentId, componentLogicalName);
         }
     }
 
-    private static async Task<string> GetViewDiffAsync(Guid viewId)
+    private static async Task<List<Entity>> GetLayersViaApiAsync(Guid componentId, string componentLogicalName)
     {
         try
         {
-            // Retrieve the view with its XML
-            var view = await Task.Run(() => _serviceClient!.Retrieve("savedquery", viewId,
-                new ColumnSet("name", "fetchxml", "layoutxml", "returnedtypecode", "ismanaged")));
-
-            var fetchXml = view.GetAttributeValue<string>("fetchxml");
-            var layoutXml = view.GetAttributeValue<string>("layoutxml");
-            var viewName = view.GetAttributeValue<string>("name") ?? "Unknown";
-
-            var diffItems = new List<string>();
-
-            // Parse FetchXML
-            if (!string.IsNullOrEmpty(fetchXml))
+            var request = new OrganizationRequest("RetrieveSolutionComponentLayers")
             {
-                try
+                Parameters =
                 {
-                    var fetchDoc = XDocument.Parse(fetchXml);
-
-                    // Count attributes (columns in query)
-                    var attributes = fetchDoc.Descendants("attribute").ToList();
-                    diffItems.Add($"Query columns: {attributes.Count}");
-
-                    // Count filters
-                    var filters = fetchDoc.Descendants("filter").ToList();
-                    var conditions = fetchDoc.Descendants("condition").ToList();
-                    if (conditions.Count > 0)
-                    {
-                        diffItems.Add($"Filter conditions: {conditions.Count}");
-                    }
-
-                    // Count linked entities
-                    var linkEntities = fetchDoc.Descendants("link-entity").ToList();
-                    if (linkEntities.Count > 0)
-                    {
-                        diffItems.Add($"Linked entities: {linkEntities.Count}");
-                    }
-
-                    // Check for order by
-                    var orderBy = fetchDoc.Descendants("order").ToList();
-                    if (orderBy.Count > 0)
-                    {
-                        var orderFields = orderBy.Select(o => o.Attribute("attribute")?.Value).Where(a => a != null);
-                        diffItems.Add($"Sort by: {string.Join(", ", orderFields)}");
-                    }
+                    { "ComponentId", componentId },
+                    { "SolutionComponentName", componentLogicalName }
                 }
-                catch
-                {
-                    diffItems.Add("Could not parse FetchXML");
-                }
+            };
+
+            var response = await Task.Run(() => _serviceClient!.Execute(request));
+
+            if (response.Results.TryGetValue("Layers", out var layersObj) && layersObj is EntityCollection layers)
+            {
+                return layers.Entities.ToList();
             }
 
-            // Parse LayoutXML
-            if (!string.IsNullOrEmpty(layoutXml))
-            {
-                try
-                {
-                    var layoutDoc = XDocument.Parse(layoutXml);
-
-                    // Count visible columns
-                    var cells = layoutDoc.Descendants("cell").ToList();
-                    diffItems.Add($"Visible columns: {cells.Count}");
-
-                    // List column names
-                    var columnNames = cells
-                        .Select(c => c.Attribute("name")?.Value)
-                        .Where(n => !string.IsNullOrEmpty(n))
-                        .ToList();
-                    if (columnNames.Count > 0)
-                    {
-                        var displayCols = columnNames.Take(8).ToList();
-                        var colsStr = string.Join(", ", displayCols);
-                        if (columnNames.Count > 8)
-                        {
-                            colsStr += $" (+{columnNames.Count - 8} more)";
-                        }
-                        diffItems.Add($"Columns: {colsStr}");
-                    }
-                }
-                catch
-                {
-                    diffItems.Add("Could not parse LayoutXML");
-                }
-            }
-
-            return diffItems.Count > 0 ? string.Join("; ", diffItems) : "No view details available";
+            return new List<Entity>();
         }
-        catch (Exception ex)
+        catch
         {
-            return $"Error retrieving view: {ex.Message}";
+            return new List<Entity>();
         }
     }
 
-    private static async Task<string> GetChartDiffAsync(Guid chartId)
+    private static string CompareLayerJson(string? activeJson, string? managedJson, int componentType, string managedSolutionName)
     {
+        var differences = new List<string>();
+        differences.Add($"[vs {managedSolutionName}]");
+
         try
         {
-            var chart = await Task.Run(() => _serviceClient!.Retrieve("savedqueryvisualization", chartId,
-                new ColumnSet("name", "datadescription", "presentationdescription", "primaryentitytypecode")));
-
-            var dataDesc = chart.GetAttributeValue<string>("datadescription");
-            var presDesc = chart.GetAttributeValue<string>("presentationdescription");
-            var chartName = chart.GetAttributeValue<string>("name") ?? "Unknown";
-
-            var diffItems = new List<string>();
-
-            // Parse data description
-            if (!string.IsNullOrEmpty(dataDesc))
+            if (string.IsNullOrEmpty(activeJson))
             {
-                try
-                {
-                    var dataDoc = XDocument.Parse(dataDesc);
-                    var measures = dataDoc.Descendants("measure").ToList();
-                    var categories = dataDoc.Descendants("category").ToList();
-
-                    if (measures.Count > 0)
-                    {
-                        diffItems.Add($"Measures: {measures.Count}");
-                    }
-                    if (categories.Count > 0)
-                    {
-                        var catAliases = categories.Select(c => c.Attribute("alias")?.Value).Where(a => a != null);
-                        diffItems.Add($"Categories: {string.Join(", ", catAliases)}");
-                    }
-                }
-                catch
-                {
-                    diffItems.Add("Could not parse chart data description");
-                }
+                return $"[vs {managedSolutionName}] Active layer has no JSON content";
             }
 
-            // Parse presentation description for chart type
-            if (!string.IsNullOrEmpty(presDesc))
+            if (string.IsNullOrEmpty(managedJson))
             {
-                try
-                {
-                    var presDoc = XDocument.Parse(presDesc);
-                    var chartType = presDoc.Descendants("Chart").FirstOrDefault()?.Element("Series")?.Element("Series")?.Attribute("ChartType")?.Value;
-                    if (!string.IsNullOrEmpty(chartType))
-                    {
-                        diffItems.Add($"Chart type: {chartType}");
-                    }
-                }
-                catch
-                {
-                    // Ignore presentation parsing errors
-                }
+                return $"[vs {managedSolutionName}] Managed layer has no JSON content - component may be new in Active";
             }
 
-            return diffItems.Count > 0 ? string.Join("; ", diffItems) : "Chart visualization";
+            // Parse both JSON documents
+            using var activeDoc = JsonDocument.Parse(activeJson);
+            using var managedDoc = JsonDocument.Parse(managedJson);
+
+            var activeRoot = activeDoc.RootElement;
+            var managedRoot = managedDoc.RootElement;
+
+            // Component-type specific comparison
+            switch (componentType)
+            {
+                case 60: // System Form
+                    differences.AddRange(CompareFormLayers(activeRoot, managedRoot));
+                    break;
+                case 26: // Saved Query (View)
+                    differences.AddRange(CompareViewLayers(activeRoot, managedRoot));
+                    break;
+                case 59: // Chart
+                    differences.AddRange(CompareChartLayers(activeRoot, managedRoot));
+                    break;
+                default:
+                    differences.AddRange(CompareGenericJson(activeRoot, managedRoot));
+                    break;
+            }
+
+            if (differences.Count == 1) // Only has the header
+            {
+                differences.Add("No differences detected in layer content");
+            }
+        }
+        catch (JsonException)
+        {
+            // JSON might actually be XML for some components
+            differences.AddRange(CompareXmlContent(activeJson, managedJson, componentType));
         }
         catch (Exception ex)
         {
-            return $"Error retrieving chart: {ex.Message}";
+            differences.Add($"Comparison error: {ex.Message}");
         }
+
+        return string.Join("; ", differences);
     }
 
-    private static async Task<string> GetAttributeDiffAsync(Guid attributeMetadataId, string entityName)
+    private static List<string> CompareFormLayers(JsonElement active, JsonElement managed)
+    {
+        var diffs = new List<string>();
+
+        try
+        {
+            // Compare tabs
+            var activeTabs = GetJsonArrayCount(active, "Tabs");
+            var managedTabs = GetJsonArrayCount(managed, "Tabs");
+            if (activeTabs != managedTabs)
+            {
+                diffs.Add($"Tabs: {managedTabs} → {activeTabs}");
+            }
+
+            // Compare controls
+            var activeControls = CountNestedElements(active, "Controls");
+            var managedControls = CountNestedElements(managed, "Controls");
+            if (activeControls != managedControls)
+            {
+                diffs.Add($"Controls: {managedControls} → {activeControls}");
+            }
+
+            // Look for formxml if present
+            if (TryGetString(active, "formxml", out var activeFormXml) &&
+                TryGetString(managed, "formxml", out var managedFormXml))
+            {
+                diffs.AddRange(CompareFormXml(activeFormXml, managedFormXml));
+            }
+
+            // Check header/footer visibility changes
+            CompareJsonProperty(active, managed, "HeaderVisible", diffs);
+            CompareJsonProperty(active, managed, "FooterVisible", diffs);
+
+            // Compare events/handlers
+            var activeEvents = CountNestedElements(active, "Events");
+            var managedEvents = CountNestedElements(managed, "Events");
+            if (activeEvents != managedEvents)
+            {
+                diffs.Add($"Events: {managedEvents} → {activeEvents}");
+            }
+        }
+        catch
+        {
+            diffs.Add("Could not fully parse form structure");
+        }
+
+        return diffs;
+    }
+
+    private static List<string> CompareFormXml(string activeXml, string managedXml)
+    {
+        var diffs = new List<string>();
+
+        try
+        {
+            var activeDoc = XDocument.Parse(activeXml);
+            var managedDoc = XDocument.Parse(managedXml);
+
+            // Compare tabs
+            var activeTabs = activeDoc.Descendants("tab").Select(t => t.Attribute("name")?.Value).Where(n => n != null).ToHashSet();
+            var managedTabs = managedDoc.Descendants("tab").Select(t => t.Attribute("name")?.Value).Where(n => n != null).ToHashSet();
+
+            var addedTabs = activeTabs.Except(managedTabs).ToList();
+            var removedTabs = managedTabs.Except(activeTabs).ToList();
+
+            if (addedTabs.Count > 0)
+                diffs.Add($"+Tabs: {string.Join(", ", addedTabs.Take(3))}{(addedTabs.Count > 3 ? $" (+{addedTabs.Count - 3} more)" : "")}");
+            if (removedTabs.Count > 0)
+                diffs.Add($"-Tabs: {string.Join(", ", removedTabs.Take(3))}{(removedTabs.Count > 3 ? $" (+{removedTabs.Count - 3} more)" : "")}");
+
+            // Compare sections
+            var activeSections = activeDoc.Descendants("section").Select(s => s.Attribute("name")?.Value).Where(n => n != null).ToHashSet();
+            var managedSections = managedDoc.Descendants("section").Select(s => s.Attribute("name")?.Value).Where(n => n != null).ToHashSet();
+
+            var addedSections = activeSections.Except(managedSections).ToList();
+            var removedSections = managedSections.Except(activeSections).ToList();
+
+            if (addedSections.Count > 0)
+                diffs.Add($"+Sections: {addedSections.Count}");
+            if (removedSections.Count > 0)
+                diffs.Add($"-Sections: {removedSections.Count}");
+
+            // Compare fields/controls
+            var activeFields = activeDoc.Descendants("control")
+                .Select(c => c.Attribute("datafieldname")?.Value ?? c.Attribute("id")?.Value)
+                .Where(n => n != null).ToHashSet();
+            var managedFields = managedDoc.Descendants("control")
+                .Select(c => c.Attribute("datafieldname")?.Value ?? c.Attribute("id")?.Value)
+                .Where(n => n != null).ToHashSet();
+
+            var addedFields = activeFields.Except(managedFields).ToList();
+            var removedFields = managedFields.Except(activeFields).ToList();
+
+            if (addedFields.Count > 0)
+                diffs.Add($"+Fields: {string.Join(", ", addedFields.Take(5))}{(addedFields.Count > 5 ? $" (+{addedFields.Count - 5} more)" : "")}");
+            if (removedFields.Count > 0)
+                diffs.Add($"-Fields: {string.Join(", ", removedFields.Take(5))}{(removedFields.Count > 5 ? $" (+{removedFields.Count - 5} more)" : "")}");
+        }
+        catch
+        {
+            // XML parsing failed
+        }
+
+        return diffs;
+    }
+
+    private static List<string> CompareViewLayers(JsonElement active, JsonElement managed)
+    {
+        var diffs = new List<string>();
+
+        try
+        {
+            // Compare fetchxml if present
+            if (TryGetString(active, "fetchxml", out var activeFetch) &&
+                TryGetString(managed, "fetchxml", out var managedFetch))
+            {
+                diffs.AddRange(CompareFetchXml(activeFetch, managedFetch));
+            }
+
+            // Compare layoutxml if present
+            if (TryGetString(active, "layoutxml", out var activeLayout) &&
+                TryGetString(managed, "layoutxml", out var managedLayout))
+            {
+                diffs.AddRange(CompareLayoutXml(activeLayout, managedLayout));
+            }
+
+            // Compare column count
+            var activeColumns = GetJsonArrayCount(active, "Columns");
+            var managedColumns = GetJsonArrayCount(managed, "Columns");
+            if (activeColumns != managedColumns && (activeColumns > 0 || managedColumns > 0))
+            {
+                diffs.Add($"Columns: {managedColumns} → {activeColumns}");
+            }
+        }
+        catch
+        {
+            diffs.Add("Could not fully parse view structure");
+        }
+
+        return diffs;
+    }
+
+    private static List<string> CompareFetchXml(string activeFetch, string managedFetch)
+    {
+        var diffs = new List<string>();
+
+        try
+        {
+            var activeDoc = XDocument.Parse(activeFetch);
+            var managedDoc = XDocument.Parse(managedFetch);
+
+            // Compare query columns
+            var activeAttrs = activeDoc.Descendants("attribute").Select(a => a.Attribute("name")?.Value).Where(n => n != null).ToHashSet();
+            var managedAttrs = managedDoc.Descendants("attribute").Select(a => a.Attribute("name")?.Value).Where(n => n != null).ToHashSet();
+
+            var addedAttrs = activeAttrs.Except(managedAttrs).ToList();
+            var removedAttrs = managedAttrs.Except(activeAttrs).ToList();
+
+            if (addedAttrs.Count > 0)
+                diffs.Add($"+Query cols: {string.Join(", ", addedAttrs.Take(4))}{(addedAttrs.Count > 4 ? $" (+{addedAttrs.Count - 4})" : "")}");
+            if (removedAttrs.Count > 0)
+                diffs.Add($"-Query cols: {string.Join(", ", removedAttrs.Take(4))}{(removedAttrs.Count > 4 ? $" (+{removedAttrs.Count - 4})" : "")}");
+
+            // Compare filter conditions
+            var activeConditions = activeDoc.Descendants("condition").Count();
+            var managedConditions = managedDoc.Descendants("condition").Count();
+            if (activeConditions != managedConditions)
+            {
+                diffs.Add($"Filters: {managedConditions} → {activeConditions}");
+            }
+
+            // Compare linked entities
+            var activeLinks = activeDoc.Descendants("link-entity").Select(l => l.Attribute("name")?.Value).Where(n => n != null).ToHashSet();
+            var managedLinks = managedDoc.Descendants("link-entity").Select(l => l.Attribute("name")?.Value).Where(n => n != null).ToHashSet();
+
+            if (!activeLinks.SetEquals(managedLinks))
+            {
+                var added = activeLinks.Except(managedLinks).ToList();
+                var removed = managedLinks.Except(activeLinks).ToList();
+                if (added.Count > 0) diffs.Add($"+Links: {string.Join(", ", added)}");
+                if (removed.Count > 0) diffs.Add($"-Links: {string.Join(", ", removed)}");
+            }
+
+            // Compare sort order
+            var activeOrder = activeDoc.Descendants("order").Select(o => o.Attribute("attribute")?.Value).FirstOrDefault();
+            var managedOrder = managedDoc.Descendants("order").Select(o => o.Attribute("attribute")?.Value).FirstOrDefault();
+            if (activeOrder != managedOrder)
+            {
+                diffs.Add($"Sort: {managedOrder ?? "none"} → {activeOrder ?? "none"}");
+            }
+        }
+        catch
+        {
+            // XML parsing failed
+        }
+
+        return diffs;
+    }
+
+    private static List<string> CompareLayoutXml(string activeLayout, string managedLayout)
+    {
+        var diffs = new List<string>();
+
+        try
+        {
+            var activeDoc = XDocument.Parse(activeLayout);
+            var managedDoc = XDocument.Parse(managedLayout);
+
+            var activeCells = activeDoc.Descendants("cell").Select(c => c.Attribute("name")?.Value).Where(n => n != null).ToList();
+            var managedCells = managedDoc.Descendants("cell").Select(c => c.Attribute("name")?.Value).Where(n => n != null).ToList();
+
+            var added = activeCells.Except(managedCells).ToList();
+            var removed = managedCells.Except(activeCells).ToList();
+
+            if (added.Count > 0)
+                diffs.Add($"+Visible: {string.Join(", ", added.Take(4))}{(added.Count > 4 ? $" (+{added.Count - 4})" : "")}");
+            if (removed.Count > 0)
+                diffs.Add($"-Visible: {string.Join(", ", removed.Take(4))}{(removed.Count > 4 ? $" (+{removed.Count - 4})" : "")}");
+
+            // Check column width changes
+            var activeWidths = activeDoc.Descendants("cell")
+                .Select(c => new { Name = c.Attribute("name")?.Value, Width = c.Attribute("width")?.Value })
+                .Where(c => c.Name != null)
+                .ToDictionary(c => c.Name!, c => c.Width);
+            var managedWidths = managedDoc.Descendants("cell")
+                .Select(c => new { Name = c.Attribute("name")?.Value, Width = c.Attribute("width")?.Value })
+                .Where(c => c.Name != null)
+                .ToDictionary(c => c.Name!, c => c.Width);
+
+            var widthChanges = activeWidths.Keys.Intersect(managedWidths.Keys)
+                .Where(k => activeWidths[k] != managedWidths[k])
+                .ToList();
+            if (widthChanges.Count > 0)
+            {
+                diffs.Add($"Width changes: {widthChanges.Count} columns");
+            }
+        }
+        catch
+        {
+            // XML parsing failed
+        }
+
+        return diffs;
+    }
+
+    private static List<string> CompareChartLayers(JsonElement active, JsonElement managed)
+    {
+        var diffs = new List<string>();
+
+        try
+        {
+            // Compare data description
+            if (TryGetString(active, "datadescription", out var activeData) &&
+                TryGetString(managed, "datadescription", out var managedData))
+            {
+                if (activeData != managedData)
+                {
+                    diffs.Add("Data definition changed");
+                }
+            }
+
+            // Compare presentation
+            if (TryGetString(active, "presentationdescription", out var activePres) &&
+                TryGetString(managed, "presentationdescription", out var managedPres))
+            {
+                if (activePres != managedPres)
+                {
+                    diffs.Add("Chart presentation changed");
+                }
+            }
+
+            CompareJsonProperty(active, managed, "ChartType", diffs);
+            CompareJsonProperty(active, managed, "Name", diffs);
+        }
+        catch
+        {
+            diffs.Add("Could not fully parse chart structure");
+        }
+
+        return diffs;
+    }
+
+    private static List<string> CompareGenericJson(JsonElement active, JsonElement managed)
+    {
+        var diffs = new List<string>();
+
+        try
+        {
+            // Count top-level property differences
+            var activeProps = GetPropertyNames(active);
+            var managedProps = GetPropertyNames(managed);
+
+            var added = activeProps.Except(managedProps).ToList();
+            var removed = managedProps.Except(activeProps).ToList();
+
+            if (added.Count > 0)
+                diffs.Add($"+Properties: {string.Join(", ", added.Take(5))}{(added.Count > 5 ? $" (+{added.Count - 5})" : "")}");
+            if (removed.Count > 0)
+                diffs.Add($"-Properties: {string.Join(", ", removed.Take(5))}{(removed.Count > 5 ? $" (+{removed.Count - 5})" : "")}");
+
+            // Check for value changes in common properties
+            var common = activeProps.Intersect(managedProps);
+            int changedCount = 0;
+            foreach (var prop in common)
+            {
+                if (active.TryGetProperty(prop, out var activeVal) && managed.TryGetProperty(prop, out var managedVal))
+                {
+                    if (activeVal.ToString() != managedVal.ToString())
+                    {
+                        changedCount++;
+                    }
+                }
+            }
+            if (changedCount > 0)
+            {
+                diffs.Add($"Modified properties: {changedCount}");
+            }
+        }
+        catch
+        {
+            diffs.Add("Could not parse JSON structure");
+        }
+
+        return diffs;
+    }
+
+    private static List<string> CompareXmlContent(string? activeContent, string? managedContent, int componentType)
+    {
+        var diffs = new List<string>();
+
+        if (string.IsNullOrEmpty(activeContent) || string.IsNullOrEmpty(managedContent))
+        {
+            return diffs;
+        }
+
+        try
+        {
+            var activeDoc = XDocument.Parse(activeContent);
+            var managedDoc = XDocument.Parse(managedContent);
+
+            // Generic XML comparison based on component type
+            switch (componentType)
+            {
+                case 60: // Form
+                    diffs.AddRange(CompareFormXml(activeContent, managedContent));
+                    break;
+                case 26: // View
+                    diffs.AddRange(CompareFetchXml(activeContent, managedContent));
+                    break;
+                default:
+                    // Generic element count comparison
+                    var activeElements = activeDoc.Descendants().Count();
+                    var managedElements = managedDoc.Descendants().Count();
+                    if (activeElements != managedElements)
+                    {
+                        diffs.Add($"Elements: {managedElements} → {activeElements}");
+                    }
+                    break;
+            }
+        }
+        catch
+        {
+            diffs.Add("Content changed (not parseable as XML)");
+        }
+
+        return diffs;
+    }
+
+    private static async Task<string> GetComponentSpecificDiffAsync(int componentType, Guid componentId, string entityName, string managedSolutionName)
+    {
+        // Fallback for when layer JSON isn't available - compare current state to description
+        var diffs = new List<string>();
+        diffs.Add($"[vs {managedSolutionName}]");
+
+        try
+        {
+            switch (componentType)
+            {
+                case 2: // Attribute
+                    if (!string.IsNullOrEmpty(entityName))
+                    {
+                        var attrDiff = await GetAttributeLayerDiffAsync(componentId, entityName);
+                        diffs.Add(attrDiff);
+                    }
+                    break;
+
+                case 60: // Form
+                    var formDiff = await GetFormLayerDiffAsync(componentId);
+                    diffs.Add(formDiff);
+                    break;
+
+                case 26: // View
+                    var viewDiff = await GetViewLayerDiffAsync(componentId);
+                    diffs.Add(viewDiff);
+                    break;
+
+                default:
+                    diffs.Add("Detailed diff not available - component has unmanaged customizations");
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            diffs.Add($"Error: {ex.Message}");
+        }
+
+        return string.Join("; ", diffs);
+    }
+
+    private static async Task<string> GetAttributeLayerDiffAsync(Guid attributeMetadataId, string entityName)
     {
         try
         {
-            if (string.IsNullOrEmpty(entityName))
-            {
-                return "Entity name not available for attribute diff";
-            }
-
-            // Retrieve entity metadata with attributes to find this specific attribute
             var request = new RetrieveEntityRequest
             {
                 LogicalName = entityName,
@@ -2350,196 +2660,177 @@ class Program
             };
 
             var response = await Task.Run(() => (RetrieveEntityResponse)_serviceClient!.Execute(request));
-
             var attribute = response.EntityMetadata.Attributes
                 .FirstOrDefault(a => a.MetadataId == attributeMetadataId);
 
             if (attribute == null)
             {
-                return "Attribute not found in entity metadata";
+                return "Attribute not found";
             }
 
-            var diffItems = new List<string>();
-
-            // Basic info
-            diffItems.Add($"Logical name: {attribute.LogicalName}");
-            diffItems.Add($"Type: {attribute.AttributeType}");
-
-            // Display name
-            if (attribute.DisplayName?.UserLocalizedLabel?.Label != null)
+            // For attributes, we can note what's customizable
+            var info = new List<string>();
+            if (!attribute.IsManaged.GetValueOrDefault())
             {
-                diffItems.Add($"Display: {attribute.DisplayName.UserLocalizedLabel.Label}");
+                info.Add("Unmanaged attribute");
             }
-
-            // Requirement level
-            if (attribute.RequiredLevel?.Value != null)
+            if (attribute.IsCustomizable?.Value == true)
             {
-                diffItems.Add($"Required: {attribute.RequiredLevel.Value}");
+                info.Add("Customizable");
             }
+            info.Add($"Type: {attribute.AttributeType}");
 
-            // Type-specific info
-            switch (attribute)
-            {
-                case StringAttributeMetadata strAttr:
-                    diffItems.Add($"Max length: {strAttr.MaxLength}");
-                    if (strAttr.Format != null)
-                        diffItems.Add($"Format: {strAttr.Format}");
-                    break;
-
-                case IntegerAttributeMetadata intAttr:
-                    diffItems.Add($"Range: {intAttr.MinValue} - {intAttr.MaxValue}");
-                    break;
-
-                case DecimalAttributeMetadata decAttr:
-                    diffItems.Add($"Precision: {decAttr.Precision}");
-                    diffItems.Add($"Range: {decAttr.MinValue} - {decAttr.MaxValue}");
-                    break;
-
-                case MoneyAttributeMetadata moneyAttr:
-                    diffItems.Add($"Precision: {moneyAttr.Precision}");
-                    break;
-
-                case PicklistAttributeMetadata picklistAttr:
-                    var optionCount = picklistAttr.OptionSet?.Options?.Count ?? 0;
-                    diffItems.Add($"Options: {optionCount}");
-                    break;
-
-                case LookupAttributeMetadata lookupAttr:
-                    var targets = lookupAttr.Targets != null ? string.Join(", ", lookupAttr.Targets) : "Unknown";
-                    diffItems.Add($"Targets: {targets}");
-                    break;
-
-                case DateTimeAttributeMetadata dateAttr:
-                    if (dateAttr.Format != null)
-                        diffItems.Add($"Format: {dateAttr.Format}");
-                    break;
-            }
-
-            return string.Join("; ", diffItems);
+            return string.Join(", ", info);
         }
         catch (Exception ex)
         {
-            return $"Error retrieving attribute: {ex.Message}";
+            return $"Error: {ex.Message}";
         }
     }
 
-    private static async Task<string> GetWebResourceDiffAsync(Guid webResourceId)
+    private static async Task<string> GetFormLayerDiffAsync(Guid formId)
     {
         try
         {
-            var webResource = await Task.Run(() => _serviceClient!.Retrieve("webresource", webResourceId,
-                new ColumnSet("name", "webresourcetype", "displayname", "description")));
+            var form = await Task.Run(() => _serviceClient!.Retrieve("systemform", formId,
+                new ColumnSet("name", "formxml", "ismanaged")));
 
-            var name = webResource.GetAttributeValue<string>("name") ?? "Unknown";
-            var displayName = webResource.GetAttributeValue<string>("displayname");
-            var webResourceType = webResource.GetAttributeValue<OptionSetValue>("webresourcetype")?.Value ?? 0;
+            var formXml = form.GetAttributeValue<string>("formxml");
+            var isManaged = form.GetAttributeValue<bool>("ismanaged");
 
-            var typeName = webResourceType switch
+            if (string.IsNullOrEmpty(formXml))
             {
-                1 => "HTML",
-                2 => "CSS",
-                3 => "JavaScript",
-                4 => "XML",
-                5 => "PNG",
-                6 => "JPG",
-                7 => "GIF",
-                8 => "Silverlight (XAP)",
-                9 => "Stylesheet (XSL)",
-                10 => "ICO",
-                11 => "Vector (SVG)",
-                12 => "RESX",
-                _ => $"Type {webResourceType}"
-            };
-
-            var diffItems = new List<string>
-            {
-                $"Name: {name}",
-                $"Type: {typeName}"
-            };
-
-            if (!string.IsNullOrEmpty(displayName))
-            {
-                diffItems.Add($"Display: {displayName}");
+                return "Form XML not available";
             }
 
-            return string.Join("; ", diffItems);
+            var doc = XDocument.Parse(formXml);
+            var tabs = doc.Descendants("tab").Count();
+            var sections = doc.Descendants("section").Count();
+            var controls = doc.Descendants("control").Count();
+
+            return $"Current: {tabs} tabs, {sections} sections, {controls} controls";
         }
         catch (Exception ex)
         {
-            return $"Error retrieving web resource: {ex.Message}";
+            return $"Error: {ex.Message}";
         }
     }
 
-    private static async Task<string> GetWorkflowDiffAsync(Guid workflowId)
+    private static async Task<string> GetViewLayerDiffAsync(Guid viewId)
     {
         try
         {
-            var workflow = await Task.Run(() => _serviceClient!.Retrieve("workflow", workflowId,
-                new ColumnSet("name", "category", "type", "scope", "mode", "primaryentity", "triggeroncreate", "triggeronupdate", "triggerondelete")));
+            var view = await Task.Run(() => _serviceClient!.Retrieve("savedquery", viewId,
+                new ColumnSet("name", "fetchxml", "layoutxml", "ismanaged")));
 
-            var name = workflow.GetAttributeValue<string>("name") ?? "Unknown";
-            var category = workflow.GetAttributeValue<OptionSetValue>("category")?.Value ?? 0;
-            var type = workflow.GetAttributeValue<OptionSetValue>("type")?.Value ?? 0;
-            var scope = workflow.GetAttributeValue<OptionSetValue>("scope")?.Value ?? 0;
-            var mode = workflow.GetAttributeValue<OptionSetValue>("mode")?.Value ?? 0;
-            var primaryEntity = workflow.GetAttributeValue<string>("primaryentity") ?? "None";
+            var fetchXml = view.GetAttributeValue<string>("fetchxml");
+            var layoutXml = view.GetAttributeValue<string>("layoutxml");
 
-            var categoryName = category switch
+            var info = new List<string>();
+
+            if (!string.IsNullOrEmpty(fetchXml))
             {
-                0 => "Workflow",
-                1 => "Dialog",
-                2 => "Business Rule",
-                3 => "Action",
-                4 => "Business Process Flow",
-                5 => "Modern Flow",
-                6 => "Desktop Flow",
-                _ => $"Category {category}"
-            };
-
-            var scopeName = scope switch
-            {
-                1 => "User",
-                2 => "Business Unit",
-                3 => "Parent-Child Business Units",
-                4 => "Organization",
-                _ => $"Scope {scope}"
-            };
-
-            var modeName = mode switch
-            {
-                0 => "Background",
-                1 => "Real-time",
-                _ => $"Mode {mode}"
-            };
-
-            var diffItems = new List<string>
-            {
-                $"Category: {categoryName}",
-                $"Entity: {primaryEntity}",
-                $"Scope: {scopeName}",
-                $"Mode: {modeName}"
-            };
-
-            // Add trigger info
-            var triggers = new List<string>();
-            if (workflow.GetAttributeValue<bool>("triggeroncreate"))
-                triggers.Add("Create");
-            if (workflow.GetAttributeValue<bool>("triggeronupdate"))
-                triggers.Add("Update");
-            if (workflow.GetAttributeValue<bool>("triggerondelete"))
-                triggers.Add("Delete");
-
-            if (triggers.Count > 0)
-            {
-                diffItems.Add($"Triggers: {string.Join(", ", triggers)}");
+                var fetchDoc = XDocument.Parse(fetchXml);
+                var attrs = fetchDoc.Descendants("attribute").Count();
+                var conditions = fetchDoc.Descendants("condition").Count();
+                info.Add($"Query: {attrs} columns, {conditions} filters");
             }
 
-            return string.Join("; ", diffItems);
+            if (!string.IsNullOrEmpty(layoutXml))
+            {
+                var layoutDoc = XDocument.Parse(layoutXml);
+                var cells = layoutDoc.Descendants("cell").Count();
+                info.Add($"Layout: {cells} visible columns");
+            }
+
+            return info.Count > 0 ? string.Join("; ", info) : "View details not available";
         }
         catch (Exception ex)
         {
-            return $"Error retrieving workflow: {ex.Message}";
+            return $"Error: {ex.Message}";
         }
+    }
+
+    // Helper methods for JSON comparison
+    private static int GetJsonArrayCount(JsonElement element, string propertyName)
+    {
+        if (element.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.Array)
+        {
+            return prop.GetArrayLength();
+        }
+        return 0;
+    }
+
+    private static int CountNestedElements(JsonElement element, string propertyName)
+    {
+        int count = 0;
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in element.EnumerateObject())
+            {
+                if (prop.Name == propertyName && prop.Value.ValueKind == JsonValueKind.Array)
+                {
+                    count += prop.Value.GetArrayLength();
+                }
+                count += CountNestedElements(prop.Value, propertyName);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                count += CountNestedElements(item, propertyName);
+            }
+        }
+        return count;
+    }
+
+    private static bool TryGetString(JsonElement element, string propertyName, out string value)
+    {
+        value = string.Empty;
+        if (element.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.String)
+        {
+            value = prop.GetString() ?? string.Empty;
+            return true;
+        }
+        return false;
+    }
+
+    private static void CompareJsonProperty(JsonElement active, JsonElement managed, string propertyName, List<string> diffs)
+    {
+        var activeHas = active.TryGetProperty(propertyName, out var activeVal);
+        var managedHas = managed.TryGetProperty(propertyName, out var managedVal);
+
+        if (activeHas && managedHas)
+        {
+            var activeStr = activeVal.ToString();
+            var managedStr = managedVal.ToString();
+            if (activeStr != managedStr)
+            {
+                diffs.Add($"{propertyName}: {managedStr} → {activeStr}");
+            }
+        }
+        else if (activeHas && !managedHas)
+        {
+            diffs.Add($"+{propertyName}: {activeVal}");
+        }
+        else if (!activeHas && managedHas)
+        {
+            diffs.Add($"-{propertyName}: {managedVal}");
+        }
+    }
+
+    private static HashSet<string> GetPropertyNames(JsonElement element)
+    {
+        var names = new HashSet<string>();
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in element.EnumerateObject())
+            {
+                names.Add(prop.Name);
+            }
+        }
+        return names;
     }
 
     private static async Task<string> GetPowerPagesDiffAsync(Entity ppComponent)
@@ -2550,19 +2841,15 @@ class Program
             var componentType = ppComponent.GetAttributeValue<OptionSetValue>("powerpagecomponenttype")?.Value ?? 0;
             var componentTypeName = GetPowerPagesComponentTypeName(componentType);
 
-            // For Power Pages, we can note that the component has been customized
-            // More detailed diff would require component-specific content analysis
             var diffItems = new List<string>
             {
                 $"Type: {componentTypeName}",
                 "Has unmanaged customizations in Active Solution"
             };
 
-            // Check if the component has content we can analyze
             var content = ppComponent.GetAttributeValue<string>("content");
             if (!string.IsNullOrEmpty(content))
             {
-                // Estimate content size
                 var sizeKb = content.Length / 1024.0;
                 diffItems.Add($"Content size: {sizeKb:F1} KB");
             }
