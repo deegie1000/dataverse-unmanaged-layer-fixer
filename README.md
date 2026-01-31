@@ -120,9 +120,21 @@ dotnet run
 
    You can select multiple solutions at once by entering a comma-separated list of numbers. All selected solutions will be processed in sequence.
 
-3. **Component Scanning**: After selecting solution(s), the tool scans all components and checks for unmanaged layers.
+3. **Export Only Mode**: After selecting solutions, you'll be asked if you want to run in export-only mode:
+   ```
+   Export only (no removal prompts)? (y/n): y
+   Running in export-only mode - no layers will be removed.
+   ```
 
-4. **Layer Review**: For each component with an unmanaged layer, you'll see details like:
+   In export-only mode:
+   - The tool scans all selected solutions for unmanaged customizations
+   - No removal prompts are shown - all layers are skipped
+   - After scanning, you're prompted to export results to Excel
+   - This is useful for auditing or reporting without making any changes
+
+4. **Component Scanning**: After selecting solution(s), the tool scans all components and checks for unmanaged layers.
+
+5. **Layer Review**: For each component with an unmanaged layer, you'll see details like:
    ```
    ===========================================
      UNMANAGED LAYER FOUND
@@ -155,13 +167,13 @@ dotnet run
      ...
    ```
 
-5. **Removal Options**:
+6. **Removal Options** (skipped in export-only mode):
    - `y` - Remove this specific unmanaged layer
    - `n` - Skip this layer and continue to the next
    - `a` - Automatically remove all remaining unmanaged layers
    - `s` - Skip all remaining components and finish
 
-6. **Summary**: After processing, you'll see a summary:
+7. **Summary**: After processing, you'll see a summary:
    ```
    -------------------------------------------
    Summary:
@@ -170,12 +182,12 @@ dotnet run
      Total unmanaged layers removed: 3
    ```
 
-7. **Multiple Solutions**: After completing a solution, you'll be prompted:
+8. **Multiple Solutions**: After completing a solution (when not in export-only mode), you'll be prompted:
    ```
-   Do you want to check another solution? (y/n):
+   Do you want to check more solutions? (y/n):
    ```
 
-8. **Excel Export**: After you're done processing solutions (when you answer "n" to checking another solution), you'll be prompted to export all results:
+9. **Excel Export**: After you're done processing solutions (when you answer "n" to checking another solution, or immediately after scanning in export-only mode), you'll be prompted to export all results:
    ```
    Found 25 unmanaged customizations across 2 solution(s).
    Do you want to export results to Excel? (y/n): y
@@ -187,18 +199,18 @@ dotnet run
    - Change the filename (default: `D365-Solution-Active-Layers-{timestamp}.xlsx`)
    - The dialog defaults to your Documents folder
 
-   The Excel file includes:
+   The Excel file includes two worksheets:
    - **Summary worksheet** (first sheet) with:
      - Overall statistics (total solutions, components, removed/skipped/failed counts)
      - Breakdown by solution table
      - Breakdown by component type table
-   - **One worksheet per solution** (worksheet name = solution name) with:
+   - **Details worksheet** (second sheet) with all components:
+     - Solution name (to identify which solution each component belongs to)
      - Component name, type, and ID
      - Entity name (for entity subcomponents)
      - Modified on/by information
      - Removal status (Removed, Skipped, or Removal Failed)
      - Color-coded status cells (green=removed, yellow=skipped, red=failed)
-     - Summary statistics for that solution
 
 ## Power Pages Support
 

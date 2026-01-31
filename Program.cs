@@ -92,6 +92,17 @@ class Program
             // Clear the solution name after first use (so user can select interactively next time)
             solutionName = null;
 
+            // Ask if export only mode
+            Console.WriteLine();
+            Console.Write("Export only (no removal prompts)? (y/n): ");
+            string? exportOnlyResponse = Console.ReadLine()?.Trim().ToLower();
+            bool exportOnly = exportOnlyResponse == "y" || exportOnlyResponse == "yes";
+
+            if (exportOnly)
+            {
+                Console.WriteLine("Running in export-only mode - no layers will be removed.");
+            }
+
             // Process all selected solutions
             for (int i = 0; i < selectedSolutions.Count; i++)
             {
@@ -104,12 +115,18 @@ class Program
                     Console.WriteLine($"========== Processing solution {i + 1} of {selectedSolutions.Count} ==========");
                 }
 
-                var results = await ProcessSolutionComponentsAsync(solution);
+                var results = await ProcessSolutionComponentsAsync(solution, exportOnly);
 
                 if (results.Count > 0)
                 {
                     allSolutionResults[solutionFriendlyName] = results;
                 }
+            }
+
+            // If export only, skip the "check more solutions" prompt and go straight to export
+            if (exportOnly)
+            {
+                break;
             }
 
             Console.WriteLine();
@@ -381,7 +398,7 @@ class Program
         }
     }
 
-    private static async Task<List<ComponentResult>> ProcessSolutionComponentsAsync(Entity solution)
+    private static async Task<List<ComponentResult>> ProcessSolutionComponentsAsync(Entity solution, bool exportOnly = false)
     {
         Guid solutionId = solution.GetAttributeValue<Guid>("solutionid");
         string solutionName = solution.GetAttributeValue<string>("friendlyname") ?? "Unknown";
@@ -466,7 +483,7 @@ class Program
 
         int layersRemoved = 0;
         bool removeAll = false;
-        bool skipAll = false;
+        bool skipAll = exportOnly; // If export only, skip all removals
 
         // Process standard component layers
         for (int i = 0; i < matchingLayers.Count; i++)
@@ -479,45 +496,29 @@ class Program
             var modifiedOn = layer.GetAttributeValue<DateTime?>("msdyn_overwritetime");
             var modifiedBy = layer.GetAttributeValue<string>("msdyn_publishername") ?? "Unknown";
 
-            DisplayLayerInfo(layer, componentType);
-
             bool wasRemoved = false;
-            string removalStatus = "Skipped";
+            string removalStatus = "Not Removed";
 
-            if (skipAll)
+            if (exportOnly)
             {
-                // Already skipping all - just record it
-                removalStatus = "Skipped (Skip All)";
-            }
-            else if (removeAll)
-            {
-                Console.WriteLine("Auto-removing unmanaged layer...");
-                wasRemoved = await RemoveUnmanagedLayerAsync(layer, logicalName);
-                if (wasRemoved)
+                // Export only mode - just collect data, no prompts
+                if (i == 0)
                 {
-                    layersRemoved++;
-                    removalStatus = "Removed";
+                    Console.WriteLine($"Collecting {matchingLayers.Count} standard components for export...");
                 }
-                else
-                {
-                    removalStatus = "Removal Failed";
-                }
-                Console.WriteLine();
             }
             else
             {
-                Console.Write("Do you want to remove this unmanaged layer? (y/n/a=all/s=skip all): ");
-                string? response = Console.ReadLine()?.Trim().ToLower();
+                DisplayLayerInfo(layer, componentType);
 
-                if (response == "s")
+                if (skipAll)
                 {
-                    Console.WriteLine("Skipping remaining layers.");
-                    skipAll = true;
+                    // Already skipping all - just record it
                     removalStatus = "Skipped (Skip All)";
                 }
-                else if (response == "a")
+                else if (removeAll)
                 {
-                    removeAll = true;
+                    Console.WriteLine("Auto-removing unmanaged layer...");
                     wasRemoved = await RemoveUnmanagedLayerAsync(layer, logicalName);
                     if (wasRemoved)
                     {
@@ -530,26 +531,53 @@ class Program
                     }
                     Console.WriteLine();
                 }
-                else if (response == "y")
+                else
                 {
-                    wasRemoved = await RemoveUnmanagedLayerAsync(layer, logicalName);
-                    if (wasRemoved)
+                    Console.Write("Do you want to remove this unmanaged layer? (y/n/a=all/s=skip all): ");
+                    string? response = Console.ReadLine()?.Trim().ToLower();
+
+                    if (response == "s")
                     {
-                        layersRemoved++;
-                        removalStatus = "Removed";
+                        Console.WriteLine("Skipping remaining layers.");
+                        skipAll = true;
+                        removalStatus = "Skipped (Skip All)";
+                    }
+                    else if (response == "a")
+                    {
+                        removeAll = true;
+                        wasRemoved = await RemoveUnmanagedLayerAsync(layer, logicalName);
+                        if (wasRemoved)
+                        {
+                            layersRemoved++;
+                            removalStatus = "Removed";
+                        }
+                        else
+                        {
+                            removalStatus = "Removal Failed";
+                        }
+                        Console.WriteLine();
+                    }
+                    else if (response == "y")
+                    {
+                        wasRemoved = await RemoveUnmanagedLayerAsync(layer, logicalName);
+                        if (wasRemoved)
+                        {
+                            layersRemoved++;
+                            removalStatus = "Removed";
+                        }
+                        else
+                        {
+                            removalStatus = "Removal Failed";
+                        }
                     }
                     else
                     {
-                        removalStatus = "Removal Failed";
+                        Console.WriteLine("Skipped.");
+                        removalStatus = "Skipped";
                     }
-                }
-                else
-                {
-                    Console.WriteLine("Skipped.");
-                    removalStatus = "Skipped";
-                }
 
-                Console.WriteLine();
+                    Console.WriteLine();
+                }
             }
 
             // Track result for export
@@ -568,7 +596,7 @@ class Program
 
         // Process Power Pages components
         int powerPagesRemoved = 0;
-        if (unmanagedPowerPagesComponents.Count > 0 && !skipAll)
+        if (unmanagedPowerPagesComponents.Count > 0 && !exportOnly && !skipAll)
         {
             if (!removeAll)
             {
@@ -577,6 +605,10 @@ class Program
                 Console.WriteLine("  POWER PAGES UNMANAGED CUSTOMIZATIONS");
                 Console.WriteLine("===========================================");
             }
+        }
+        else if (unmanagedPowerPagesComponents.Count > 0 && exportOnly)
+        {
+            Console.WriteLine($"Collecting {unmanagedPowerPagesComponents.Count} Power Pages components for export...");
         }
 
         for (int i = 0; i < unmanagedPowerPagesComponents.Count; i++)
@@ -591,9 +623,13 @@ class Program
             var modifiedBy = modifiedByRef?.Name ?? "Unknown";
 
             bool wasRemoved = false;
-            string removalStatus = "Skipped";
+            string removalStatus = "Not Removed";
 
-            if (skipAll)
+            if (exportOnly)
+            {
+                // Export only mode - just collect data
+            }
+            else if (skipAll)
             {
                 removalStatus = "Skipped (Skip All)";
             }
@@ -1893,55 +1929,47 @@ class Program
             // Auto-fit columns on summary sheet
             summarySheet.Columns().AdjustToContents();
 
-            // Create individual solution worksheets
+            // Create a single Details worksheet with all components
+            var detailsSheet = workbook.Worksheets.Add("Details");
+
+            // Add title
+            detailsSheet.Cell(1, 1).Value = "Unmanaged Customizations Report - All Components";
+            detailsSheet.Cell(1, 1).Style.Font.Bold = true;
+            detailsSheet.Cell(1, 1).Style.Font.FontSize = 14;
+            detailsSheet.Range(1, 1, 1, 9).Merge();
+
+            detailsSheet.Cell(2, 1).Value = $"Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
+            detailsSheet.Range(2, 1, 2, 9).Merge();
+
+            // Add headers (including Solution column)
+            int headerRow = 4;
+            var headers = new[] { "Solution", "Component Name", "Component Type", "Component ID", "Entity", "Solution Layer", "Modified On", "Modified By", "Removal Status" };
+            for (int i = 0; i < headers.Length; i++)
+            {
+                detailsSheet.Cell(headerRow, i + 1).Value = headers[i];
+                detailsSheet.Cell(headerRow, i + 1).Style.Font.Bold = true;
+                detailsSheet.Cell(headerRow, i + 1).Style.Fill.BackgroundColor = XLColor.LightGray;
+                detailsSheet.Cell(headerRow, i + 1).Style.Border.BottomBorder = XLBorderStyleValues.Thin;
+            }
+
+            // Add data from all solutions
+            int dataRow = headerRow + 1;
             foreach (var (solutionName, results) in allResults)
             {
-                // Sanitize the solution name for use as a worksheet name (max 31 chars)
-                var sanitizedSheetName = new string(solutionName
-                    .Select(c => invalidWorksheetChars.Contains(c) ? '_' : c)
-                    .ToArray());
-                if (sanitizedSheetName.Length > 31)
-                {
-                    sanitizedSheetName = sanitizedSheetName.Substring(0, 31);
-                }
-
-                var worksheet = workbook.Worksheets.Add(sanitizedSheetName);
-
-                // Add title
-                worksheet.Cell(1, 1).Value = $"Unmanaged Customizations Report - {solutionName}";
-                worksheet.Cell(1, 1).Style.Font.Bold = true;
-                worksheet.Cell(1, 1).Style.Font.FontSize = 14;
-                worksheet.Range(1, 1, 1, 8).Merge();
-
-                worksheet.Cell(2, 1).Value = $"Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
-                worksheet.Range(2, 1, 2, 8).Merge();
-
-                // Add headers
-                int headerRow = 4;
-                var headers = new[] { "Component Name", "Component Type", "Component ID", "Entity", "Solution Layer", "Modified On", "Modified By", "Removal Status" };
-                for (int i = 0; i < headers.Length; i++)
-                {
-                    worksheet.Cell(headerRow, i + 1).Value = headers[i];
-                    worksheet.Cell(headerRow, i + 1).Style.Font.Bold = true;
-                    worksheet.Cell(headerRow, i + 1).Style.Fill.BackgroundColor = XLColor.LightGray;
-                    worksheet.Cell(headerRow, i + 1).Style.Border.BottomBorder = XLBorderStyleValues.Thin;
-                }
-
-                // Add data
-                int dataRow = headerRow + 1;
                 foreach (var result in results)
                 {
-                    worksheet.Cell(dataRow, 1).Value = result.ComponentName;
-                    worksheet.Cell(dataRow, 2).Value = result.ComponentType;
-                    worksheet.Cell(dataRow, 3).Value = result.ComponentId.ToString();
-                    worksheet.Cell(dataRow, 4).Value = result.EntityName;
-                    worksheet.Cell(dataRow, 5).Value = result.SolutionLayer;
-                    worksheet.Cell(dataRow, 6).Value = result.ModifiedOn?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A";
-                    worksheet.Cell(dataRow, 7).Value = result.ModifiedBy;
-                    worksheet.Cell(dataRow, 8).Value = result.RemovalStatus;
+                    detailsSheet.Cell(dataRow, 1).Value = solutionName;
+                    detailsSheet.Cell(dataRow, 2).Value = result.ComponentName;
+                    detailsSheet.Cell(dataRow, 3).Value = result.ComponentType;
+                    detailsSheet.Cell(dataRow, 4).Value = result.ComponentId.ToString();
+                    detailsSheet.Cell(dataRow, 5).Value = result.EntityName;
+                    detailsSheet.Cell(dataRow, 6).Value = result.SolutionLayer;
+                    detailsSheet.Cell(dataRow, 7).Value = result.ModifiedOn?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A";
+                    detailsSheet.Cell(dataRow, 8).Value = result.ModifiedBy;
+                    detailsSheet.Cell(dataRow, 9).Value = result.RemovalStatus;
 
                     // Color-code the removal status
-                    var statusCell = worksheet.Cell(dataRow, 8);
+                    var statusCell = detailsSheet.Cell(dataRow, 9);
                     if (result.RemovalStatus == "Removed")
                     {
                         statusCell.Style.Fill.BackgroundColor = XLColor.LightGreen;
@@ -1957,24 +1985,10 @@ class Program
 
                     dataRow++;
                 }
-
-                // Auto-fit columns
-                worksheet.Columns().AdjustToContents();
-
-                // Add summary
-                int summaryRow = dataRow + 2;
-                worksheet.Cell(summaryRow, 1).Value = "Summary:";
-                worksheet.Cell(summaryRow, 1).Style.Font.Bold = true;
-
-                int removedCount = results.Count(r => r.WasRemoved);
-                int skippedCount = results.Count(r => !r.WasRemoved && r.RemovalStatus != "Removal Failed");
-                int failedCount = results.Count(r => r.RemovalStatus == "Removal Failed");
-
-                worksheet.Cell(summaryRow + 1, 1).Value = $"Total Components: {results.Count}";
-                worksheet.Cell(summaryRow + 2, 1).Value = $"Removed: {removedCount}";
-                worksheet.Cell(summaryRow + 3, 1).Value = $"Skipped: {skippedCount}";
-                worksheet.Cell(summaryRow + 4, 1).Value = $"Failed: {failedCount}";
             }
+
+            // Auto-fit columns on details sheet
+            detailsSheet.Columns().AdjustToContents();
 
             // Save the file
             workbook.SaveAs(filePath);
