@@ -584,34 +584,54 @@ class Program
 
         Console.WriteLine($"\r  Found {activeComponents.Count} components in Active Solution.          ");
 
-        // Step 3: Cross-reference - find components that exist in both managed solution AND Active Solution
-        Console.Write("\r  Cross-referencing with managed solution components...   ");
+        // Step 3: For entities in the managed solution, find their subcomponents in the Active Solution
+        // The managed solution typically only lists entities (type 1), not individual forms/views/etc.
+        // We need to find forms, views, attributes, etc. that belong to those entities AND are in Active Solution
+        Console.Write("\r  Finding entity subcomponents with customizations...     ");
 
-        // Collect matching components first
         var matchingComponents = new List<(Entity Component, int ComponentType, Guid ObjectId, string LogicalName)>();
 
+        // Get the set of entity logical names from the managed solution
+        var managedEntityNames = new HashSet<string>();
+        foreach (var comp in components)
+        {
+            var compType = comp.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
+            if (compType == 1) // Entity
+            {
+                var objectId = comp.GetAttributeValue<Guid>("objectid");
+                if (entityMetadataMap.TryGetValue(objectId, out var entityName))
+                {
+                    managedEntityNames.Add(entityName);
+                }
+            }
+        }
+
+        Console.WriteLine($"\r  Found {managedEntityNames.Count} entities in managed solution.              ");
+
+        // Also check for explicitly listed non-entity components (like standalone web resources, workflows)
         foreach (var component in components)
         {
             var objectId = component.GetAttributeValue<Guid>("objectid");
             var componentType = component.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
 
-            if (objectId == Guid.Empty)
+            if (objectId == Guid.Empty || componentType == 1)
                 continue;
 
-            // Skip entity-level components (type 1) - they appear in Active Solution when
-            // their subcomponents (forms, views, attributes) are customized, but the entity
-            // itself typically isn't the actual customization. Focus on the subcomponents.
-            if (componentType == 1)
-                continue;
-
-            // Check if this component exists in the Active Solution (meaning it has unmanaged customizations)
+            // Check if this explicit component is in the Active Solution
             if (activeComponents.Contains((objectId, componentType)))
             {
-                // Get the logical name for removal
                 string componentLogicalName = GetSolutionComponentLogicalName(componentType) ?? "unknown";
-
                 matchingComponents.Add((component, componentType, objectId, componentLogicalName));
             }
+        }
+
+        // Now find subcomponents (forms, views, etc.) in Active Solution that belong to our entities
+        if (managedEntityNames.Count > 0)
+        {
+            // Get Active Solution subcomponents for our entities
+            var entitySubcomponents = await GetActiveSubcomponentsForEntitiesAsync(
+                activeSolutionId, managedEntityNames, activeComponents);
+            matchingComponents.AddRange(entitySubcomponents);
         }
 
         Console.WriteLine($"\r  Found {matchingComponents.Count} components with unmanaged customizations.          ");
@@ -635,6 +655,112 @@ class Program
                 results.Add((component, activeLayer, logicalName));
             }
             Console.WriteLine($"\r  Component details fetched.                              ");
+        }
+
+        return results;
+    }
+
+    private static async Task<List<(Entity Component, int ComponentType, Guid ObjectId, string LogicalName)>> GetActiveSubcomponentsForEntitiesAsync(
+        Guid activeSolutionId, HashSet<string> entityNames, HashSet<(Guid ObjectId, int ComponentType)> activeComponents)
+    {
+        var results = new List<(Entity Component, int ComponentType, Guid ObjectId, string LogicalName)>();
+
+        // Query forms (type 60) in Active Solution that belong to our entities
+        Console.Write("\r  Checking forms...                                        ");
+        var forms = await GetEntitySubcomponentsAsync<Guid>(
+            "systemform", "formid", "objecttypecode", "name",
+            entityNames, activeComponents, 60);
+        foreach (var (id, name) in forms)
+        {
+            var comp = new Entity("solutioncomponent");
+            comp["objectid"] = id;
+            comp["componenttype"] = new OptionSetValue(60);
+            results.Add((comp, 60, id, "systemform"));
+        }
+
+        // Query views (type 26) in Active Solution that belong to our entities
+        Console.Write("\r  Checking views...                                        ");
+        var views = await GetEntitySubcomponentsAsync<Guid>(
+            "savedquery", "savedqueryid", "returnedtypecode", "name",
+            entityNames, activeComponents, 26);
+        foreach (var (id, name) in views)
+        {
+            var comp = new Entity("solutioncomponent");
+            comp["objectid"] = id;
+            comp["componenttype"] = new OptionSetValue(26);
+            results.Add((comp, 26, id, "savedquery"));
+        }
+
+        // Query charts (type 59) in Active Solution that belong to our entities
+        Console.Write("\r  Checking charts...                                       ");
+        var charts = await GetEntitySubcomponentsAsync<Guid>(
+            "savedqueryvisualization", "savedqueryvisualizationid", "primaryentitytypecode", "name",
+            entityNames, activeComponents, 59);
+        foreach (var (id, name) in charts)
+        {
+            var comp = new Entity("solutioncomponent");
+            comp["objectid"] = id;
+            comp["componenttype"] = new OptionSetValue(59);
+            results.Add((comp, 59, id, "savedqueryvisualization"));
+        }
+
+        Console.WriteLine($"\r  Found {results.Count} entity subcomponents with customizations.          ");
+        return results;
+    }
+
+    private static async Task<List<(Guid Id, string Name)>> GetEntitySubcomponentsAsync<T>(
+        string tableName, string idColumn, string entityColumn, string nameColumn,
+        HashSet<string> entityNames, HashSet<(Guid ObjectId, int ComponentType)> activeComponents, int componentType)
+    {
+        var results = new List<(Guid Id, string Name)>();
+
+        try
+        {
+            // Query for components that belong to our entities
+            var query = new QueryExpression(tableName)
+            {
+                ColumnSet = new ColumnSet(idColumn, entityColumn, nameColumn),
+                Criteria = new FilterExpression
+                {
+                    Conditions =
+                    {
+                        new ConditionExpression(entityColumn, ConditionOperator.In, entityNames.ToArray())
+                    }
+                },
+                PageInfo = new PagingInfo { Count = 5000, PageNumber = 1 }
+            };
+
+            while (true)
+            {
+                var result = await Task.Run(() => _serviceClient!.RetrieveMultiple(query));
+
+                foreach (var entity in result.Entities)
+                {
+                    var id = entity.GetAttributeValue<Guid>(idColumn);
+                    var name = entity.GetAttributeValue<string>(nameColumn) ?? id.ToString();
+
+                    // Check if this component is in the Active Solution
+                    if (activeComponents.Contains((id, componentType)))
+                    {
+                        results.Add((id, name));
+                    }
+                }
+
+                if (result.MoreRecords)
+                {
+                    query.PageInfo.PageNumber++;
+                    query.PageInfo.PagingCookie = result.PagingCookie;
+                }
+                else
+                {
+                    break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // Log but continue - some tables might not exist or be accessible
+            Console.WriteLine($"\r  Warning: Could not query {tableName}: {ex.Message}");
         }
 
         return results;
