@@ -2072,15 +2072,17 @@ class Program
             var componentLogicalName = GetSolutionComponentLogicalName(componentType);
             if (string.IsNullOrEmpty(componentLogicalName))
             {
-                return "Layer diff not available for this component type";
+                // Fall back to component-specific diff for unsupported component types
+                return await GetComponentSpecificDiffAsync(componentType, componentId, entityName, "managed");
             }
 
-            // Use the Web API to retrieve solution component layers
+            // Use the API to retrieve solution component layers
             var layers = await GetComponentLayersAsync(componentId, componentLogicalName);
 
             if (layers == null || layers.Count == 0)
             {
-                return "No layers found";
+                // Layers API didn't return data - fall back to component-specific comparison
+                return await GetComponentSpecificDiffAsync(componentType, componentId, entityName, "managed");
             }
 
             // Find the Active (unmanaged) layer and the managed layer below it
@@ -2094,7 +2096,9 @@ class Program
 
             if (activeLayer == null)
             {
-                return "Active layer not found";
+                // No active layer found but component is in Active Solution - may be a data issue
+                return await GetComponentSpecificDiffAsync(componentType, componentId, entityName,
+                    managedLayer?.GetAttributeValue<string>("msdyn_solutionname") ?? "managed");
             }
 
             if (managedLayer == null)
@@ -2119,41 +2123,22 @@ class Program
         }
         catch (Exception ex)
         {
-            return $"Error calculating diff: {ex.Message}";
+            // On any error, try component-specific diff as fallback
+            try
+            {
+                return await GetComponentSpecificDiffAsync(componentType, componentId, entityName, "managed");
+            }
+            catch
+            {
+                return $"Error calculating diff: {ex.Message}";
+            }
         }
     }
 
     private static async Task<List<Entity>> GetComponentLayersAsync(Guid componentId, string componentLogicalName)
     {
-        try
-        {
-            // Query the msdyn_componentlayer table
-            var query = new QueryExpression("msdyn_componentlayer")
-            {
-                ColumnSet = new ColumnSet("msdyn_componentid", "msdyn_componentjson", "msdyn_solutionname",
-                    "msdyn_order", "msdyn_name", "msdyn_solutioncomponentname"),
-                Criteria = new FilterExpression
-                {
-                    Conditions =
-                    {
-                        new ConditionExpression("msdyn_componentid", ConditionOperator.Equal, componentId.ToString())
-                    }
-                },
-                Orders = { new OrderExpression("msdyn_order", OrderType.Descending) }
-            };
-
-            var results = await Task.Run(() => _serviceClient!.RetrieveMultiple(query));
-            return results.Entities.ToList();
-        }
-        catch
-        {
-            // If direct query fails, try using RetrieveSolutionComponentLayers
-            return await GetLayersViaApiAsync(componentId, componentLogicalName);
-        }
-    }
-
-    private static async Task<List<Entity>> GetLayersViaApiAsync(Guid componentId, string componentLogicalName)
-    {
+        // Use RetrieveSolutionComponentLayers API - msdyn_componentlayer is a virtual entity
+        // that cannot be queried directly via QueryExpression
         try
         {
             var request = new OrganizationRequest("RetrieveSolutionComponentLayers")
@@ -2167,9 +2152,16 @@ class Program
 
             var response = await Task.Run(() => _serviceClient!.Execute(request));
 
-            if (response.Results.TryGetValue("Layers", out var layersObj) && layersObj is EntityCollection layers)
+            // The response contains SolutionComponentLayers (not just "Layers")
+            if (response.Results.TryGetValue("SolutionComponentLayers", out var layersObj) && layersObj is EntityCollection layers)
             {
                 return layers.Entities.ToList();
+            }
+
+            // Try alternative response key
+            if (response.Results.TryGetValue("Layers", out layersObj) && layersObj is EntityCollection layers2)
+            {
+                return layers2.Entities.ToList();
             }
 
             return new List<Entity>();
@@ -2178,6 +2170,12 @@ class Program
         {
             return new List<Entity>();
         }
+    }
+
+    private static async Task<List<Entity>> GetLayersViaApiAsync(Guid componentId, string componentLogicalName)
+    {
+        // This is now just an alias for GetComponentLayersAsync for backward compatibility
+        return await GetComponentLayersAsync(componentId, componentLogicalName);
     }
 
     private static string CompareLayerJson(string? activeJson, string? managedJson, int componentType, string managedSolutionName)
@@ -2609,7 +2607,7 @@ class Program
 
     private static async Task<string> GetComponentSpecificDiffAsync(int componentType, Guid componentId, string entityName, string managedSolutionName)
     {
-        // Fallback for when layer JSON isn't available - compare current state to description
+        // Fallback for when layer JSON isn't available - describe current component state
         var diffs = new List<string>();
         diffs.Add($"[vs {managedSolutionName}]");
 
@@ -2623,6 +2621,10 @@ class Program
                         var attrDiff = await GetAttributeLayerDiffAsync(componentId, entityName);
                         diffs.Add(attrDiff);
                     }
+                    else
+                    {
+                        diffs.Add("Attribute customized");
+                    }
                     break;
 
                 case 60: // Form
@@ -2635,8 +2637,23 @@ class Program
                     diffs.Add(viewDiff);
                     break;
 
+                case 59: // Chart
+                    var chartDiff = await GetChartLayerDiffAsync(componentId);
+                    diffs.Add(chartDiff);
+                    break;
+
+                case 61: // Web Resource
+                    var wrDiff = await GetWebResourceLayerDiffAsync(componentId);
+                    diffs.Add(wrDiff);
+                    break;
+
+                case 29: // Workflow
+                    var wfDiff = await GetWorkflowLayerDiffAsync(componentId);
+                    diffs.Add(wfDiff);
+                    break;
+
                 default:
-                    diffs.Add("Detailed diff not available - component has unmanaged customizations");
+                    diffs.Add($"Has unmanaged customizations ({GetComponentTypeName(componentType)})");
                     break;
             }
         }
@@ -2744,6 +2761,91 @@ class Program
             }
 
             return info.Count > 0 ? string.Join("; ", info) : "View details not available";
+        }
+        catch (Exception ex)
+        {
+            return $"Error: {ex.Message}";
+        }
+    }
+
+    private static async Task<string> GetChartLayerDiffAsync(Guid chartId)
+    {
+        try
+        {
+            var chart = await Task.Run(() => _serviceClient!.Retrieve("savedqueryvisualization", chartId,
+                new ColumnSet("name", "datadescription", "presentationdescription")));
+
+            var name = chart.GetAttributeValue<string>("name") ?? "Unknown";
+            var dataDesc = chart.GetAttributeValue<string>("datadescription");
+
+            var info = new List<string> { $"Chart: {name}" };
+
+            if (!string.IsNullOrEmpty(dataDesc))
+            {
+                try
+                {
+                    var doc = XDocument.Parse(dataDesc);
+                    var measures = doc.Descendants("measure").Count();
+                    info.Add($"{measures} measures");
+                }
+                catch { }
+            }
+
+            return string.Join(", ", info);
+        }
+        catch (Exception ex)
+        {
+            return $"Error: {ex.Message}";
+        }
+    }
+
+    private static async Task<string> GetWebResourceLayerDiffAsync(Guid webResourceId)
+    {
+        try
+        {
+            var wr = await Task.Run(() => _serviceClient!.Retrieve("webresource", webResourceId,
+                new ColumnSet("name", "webresourcetype", "displayname")));
+
+            var name = wr.GetAttributeValue<string>("name") ?? "Unknown";
+            var wrType = wr.GetAttributeValue<OptionSetValue>("webresourcetype")?.Value ?? 0;
+
+            var typeName = wrType switch
+            {
+                1 => "HTML", 2 => "CSS", 3 => "JavaScript", 4 => "XML",
+                5 => "PNG", 6 => "JPG", 7 => "GIF", 10 => "ICO", 11 => "SVG",
+                _ => $"Type {wrType}"
+            };
+
+            return $"Web Resource ({typeName}): {name}";
+        }
+        catch (Exception ex)
+        {
+            return $"Error: {ex.Message}";
+        }
+    }
+
+    private static async Task<string> GetWorkflowLayerDiffAsync(Guid workflowId)
+    {
+        try
+        {
+            var wf = await Task.Run(() => _serviceClient!.Retrieve("workflow", workflowId,
+                new ColumnSet("name", "category", "primaryentity", "mode")));
+
+            var name = wf.GetAttributeValue<string>("name") ?? "Unknown";
+            var category = wf.GetAttributeValue<OptionSetValue>("category")?.Value ?? 0;
+            var entity = wf.GetAttributeValue<string>("primaryentity") ?? "none";
+            var mode = wf.GetAttributeValue<OptionSetValue>("mode")?.Value ?? 0;
+
+            var categoryName = category switch
+            {
+                0 => "Workflow", 1 => "Dialog", 2 => "Business Rule",
+                3 => "Action", 4 => "BPF", 5 => "Flow",
+                _ => $"Category {category}"
+            };
+
+            var modeName = mode == 1 ? "Real-time" : "Background";
+
+            return $"{categoryName} ({modeName}): {name} on {entity}";
         }
         catch (Exception ex)
         {
