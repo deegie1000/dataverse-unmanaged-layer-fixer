@@ -10,8 +10,10 @@ This tool:
 
 1. **Connects to your Dataverse environment** using interactive browser-based authentication
 2. **Lists all managed solutions** in your environment (or auto-selects if specified via command line)
-3. **Scans all components** within a selected solution
-4. **Identifies unmanaged layers** for each component by querying the `msdyn_componentlayer` table
+3. **Scans all components** within a selected solution, including:
+   - Explicitly listed solution components (web resources, workflows, etc.)
+   - Entity subcomponents: Forms, Views, Charts, and Attributes/Columns
+4. **Identifies unmanaged layers** by cross-referencing with the Active Solution
 5. **Supports Power Pages components** which use a different tracking mechanism (checks the Default solution)
 6. **Displays detailed information** about each unmanaged layer found:
    - Component name and type
@@ -111,14 +113,32 @@ dotnet run
    ===========================================
      UNMANAGED LAYER FOUND
    ===========================================
-     Component Name:  account
-     Component Type:  Entity
+     Component Name:  Form: Account Main Form
+     Component Type:  System Form
      Solution Layer:  Active
      Layer Order:     0
      Modified On:     2024-01-15 14:30:22
      Modified By:     ContosoPublisher
    -------------------------------------------
    Do you want to remove this unmanaged layer? (y/n/a=all/s=skip all):
+   ```
+
+   For entity subcomponents (forms, views, charts, attributes), the entity name is displayed:
+   ```
+   ===========================================
+     UNMANAGED LAYER FOUND
+   ===========================================
+     Component Name:  Form: account.Account Main Form
+     Component Type:  System Form
+     ...
+
+     Component Name:  View: contact.Active Contacts
+     Component Type:  Saved Query
+     ...
+
+     Component Name:  Attribute: account.new_customfield
+     Component Type:  Attribute
+     ...
    ```
 
 5. **Removal Options**:

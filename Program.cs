@@ -670,11 +670,13 @@ class Program
         var forms = await GetEntitySubcomponentsAsync<Guid>(
             "systemform", "formid", "objecttypecode", "name",
             entityNames, activeComponents, 60);
-        foreach (var (id, name) in forms)
+        foreach (var (id, name, entityName) in forms)
         {
             var comp = new Entity("solutioncomponent");
             comp["objectid"] = id;
             comp["componenttype"] = new OptionSetValue(60);
+            comp["_componentname"] = name;
+            comp["_entityname"] = entityName;
             results.Add((comp, 60, id, "systemform"));
         }
 
@@ -683,11 +685,13 @@ class Program
         var views = await GetEntitySubcomponentsAsync<Guid>(
             "savedquery", "savedqueryid", "returnedtypecode", "name",
             entityNames, activeComponents, 26);
-        foreach (var (id, name) in views)
+        foreach (var (id, name, entityName) in views)
         {
             var comp = new Entity("solutioncomponent");
             comp["objectid"] = id;
             comp["componenttype"] = new OptionSetValue(26);
+            comp["_componentname"] = name;
+            comp["_entityname"] = entityName;
             results.Add((comp, 26, id, "savedquery"));
         }
 
@@ -696,23 +700,92 @@ class Program
         var charts = await GetEntitySubcomponentsAsync<Guid>(
             "savedqueryvisualization", "savedqueryvisualizationid", "primaryentitytypecode", "name",
             entityNames, activeComponents, 59);
-        foreach (var (id, name) in charts)
+        foreach (var (id, name, entityName) in charts)
         {
             var comp = new Entity("solutioncomponent");
             comp["objectid"] = id;
             comp["componenttype"] = new OptionSetValue(59);
+            comp["_componentname"] = name;
+            comp["_entityname"] = entityName;
             results.Add((comp, 59, id, "savedqueryvisualization"));
+        }
+
+        // Query attributes (type 2) in Active Solution that belong to our entities
+        Console.Write("\r  Checking attributes/columns...                           ");
+        var attributes = await GetEntityAttributesInActiveAsync(entityNames, activeComponents);
+        foreach (var (id, entityName, attributeName) in attributes)
+        {
+            var comp = new Entity("solutioncomponent");
+            comp["objectid"] = id;
+            comp["componenttype"] = new OptionSetValue(2);
+            comp["_attributename"] = attributeName; // Store for display name lookup
+            comp["_entityname"] = entityName;
+            results.Add((comp, 2, id, "attribute"));
         }
 
         Console.WriteLine($"\r  Found {results.Count} entity subcomponents with customizations.          ");
         return results;
     }
 
-    private static async Task<List<(Guid Id, string Name)>> GetEntitySubcomponentsAsync<T>(
+    private static async Task<List<(Guid MetadataId, string EntityName, string AttributeName)>> GetEntityAttributesInActiveAsync(
+        HashSet<string> entityNames, HashSet<(Guid ObjectId, int ComponentType)> activeComponents)
+    {
+        var results = new List<(Guid MetadataId, string EntityName, string AttributeName)>();
+
+        try
+        {
+            int entityCount = 0;
+            int totalEntities = entityNames.Count;
+
+            foreach (var entityName in entityNames)
+            {
+                entityCount++;
+                Console.Write($"\r  Checking attributes/columns... ({entityCount}/{totalEntities} entities)    ");
+
+                // Retrieve entity metadata with attributes
+                var request = new RetrieveEntityRequest
+                {
+                    LogicalName = entityName,
+                    EntityFilters = EntityFilters.Attributes,
+                    RetrieveAsIfPublished = false
+                };
+
+                try
+                {
+                    var response = await Task.Run(() =>
+                        (RetrieveEntityResponse)_serviceClient!.Execute(request));
+
+                    foreach (var attribute in response.EntityMetadata.Attributes)
+                    {
+                        if (attribute.MetadataId.HasValue)
+                        {
+                            // Check if this attribute's MetadataId is in the Active Solution
+                            if (activeComponents.Contains((attribute.MetadataId.Value, 2)))
+                            {
+                                results.Add((attribute.MetadataId.Value, entityName, attribute.LogicalName));
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Skip entities that can't be retrieved (may not exist or be inaccessible)
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"\r  Warning: Error checking attributes: {ex.Message}");
+        }
+
+        return results;
+    }
+
+    private static async Task<List<(Guid Id, string Name, string EntityName)>> GetEntitySubcomponentsAsync<T>(
         string tableName, string idColumn, string entityColumn, string nameColumn,
         HashSet<string> entityNames, HashSet<(Guid ObjectId, int ComponentType)> activeComponents, int componentType)
     {
-        var results = new List<(Guid Id, string Name)>();
+        var results = new List<(Guid Id, string Name, string EntityName)>();
 
         try
         {
@@ -738,11 +811,12 @@ class Program
                 {
                     var id = entity.GetAttributeValue<Guid>(idColumn);
                     var name = entity.GetAttributeValue<string>(nameColumn) ?? id.ToString();
+                    var entityName = entity.GetAttributeValue<string>(entityColumn) ?? "Unknown";
 
                     // Check if this component is in the Active Solution
                     if (activeComponents.Contains((id, componentType)))
                     {
-                        results.Add((id, name));
+                        results.Add((id, name, entityName));
                     }
                 }
 
@@ -792,24 +866,71 @@ class Program
                         }
                         break;
 
-                    case 2: // Attribute
-                        await FetchComponentNamesAsync("attribute", "attributeid", "logicalname", objectIds, names, "Attribute");
+                    case 2: // Attribute - use stored metadata from component
+                        foreach (var item in group)
+                        {
+                            var attributeName = item.Component.GetAttributeValue<string>("_attributename") ?? "Unknown";
+                            var entityName = item.Component.GetAttributeValue<string>("_entityname") ?? "Unknown";
+                            names[item.ObjectId] = $"Attribute: {entityName}.{attributeName}";
+                        }
                         break;
 
                     case 20: // Role
                         await FetchComponentNamesAsync("role", "roleid", "name", objectIds, names, "Role");
                         break;
 
-                    case 26: // Saved Query (View)
-                        await FetchComponentNamesAsync("savedquery", "savedqueryid", "name", objectIds, names, "View");
+                    case 26: // Saved Query (View) - use stored metadata if available
+                        foreach (var item in group)
+                        {
+                            var componentName = item.Component.GetAttributeValue<string>("_componentname");
+                            var entityName = item.Component.GetAttributeValue<string>("_entityname");
+                            if (!string.IsNullOrEmpty(componentName) && !string.IsNullOrEmpty(entityName))
+                            {
+                                names[item.ObjectId] = $"View: {entityName}.{componentName}";
+                            }
+                            else
+                            {
+                                // Fall back to fetching from database
+                                await FetchComponentNamesAsync("savedquery", "savedqueryid", "name", new List<Guid> { item.ObjectId }, names, "View");
+                            }
+                        }
                         break;
 
                     case 29: // Workflow
                         await FetchComponentNamesAsync("workflow", "workflowid", "name", objectIds, names, "Workflow");
                         break;
 
-                    case 60: // System Form
-                        await FetchComponentNamesAsync("systemform", "formid", "name", objectIds, names, "Form");
+                    case 59: // Chart - use stored metadata if available
+                        foreach (var item in group)
+                        {
+                            var componentName = item.Component.GetAttributeValue<string>("_componentname");
+                            var entityName = item.Component.GetAttributeValue<string>("_entityname");
+                            if (!string.IsNullOrEmpty(componentName) && !string.IsNullOrEmpty(entityName))
+                            {
+                                names[item.ObjectId] = $"Chart: {entityName}.{componentName}";
+                            }
+                            else
+                            {
+                                names[item.ObjectId] = $"Chart: {item.ObjectId}";
+                            }
+                        }
+                        break;
+
+                    case 60: // System Form - use stored metadata if available
+                        foreach (var item in group)
+                        {
+                            var componentName = item.Component.GetAttributeValue<string>("_componentname");
+                            var entityName = item.Component.GetAttributeValue<string>("_entityname");
+                            if (!string.IsNullOrEmpty(componentName) && !string.IsNullOrEmpty(entityName))
+                            {
+                                names[item.ObjectId] = $"Form: {entityName}.{componentName}";
+                            }
+                            else
+                            {
+                                // Fall back to fetching from database
+                                await FetchComponentNamesAsync("systemform", "formid", "name", new List<Guid> { item.ObjectId }, names, "Form");
+                            }
+                        }
                         break;
 
                     case 61: // Web Resource
