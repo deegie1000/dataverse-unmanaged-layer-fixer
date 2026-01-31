@@ -433,8 +433,11 @@ class Program
         List<Entity> components)
     {
         var results = new List<(Entity Component, Entity Layer)>();
+        var skippedTypes = new Dictionary<int, int>(); // Track skipped component types
+        var errorTypes = new Dictionary<int, int>(); // Track types that error on API call
         int current = 0;
         int total = components.Count;
+        int checkedCount = 0;
 
         foreach (var component in components)
         {
@@ -452,6 +455,15 @@ class Program
 
             // Get the solution component logical name for this component type
             var componentLogicalName = GetSolutionComponentLogicalName(componentType);
+
+            // Skip unsupported component types and track them
+            if (componentLogicalName == null)
+            {
+                skippedTypes[componentType] = skippedTypes.GetValueOrDefault(componentType) + 1;
+                continue;
+            }
+
+            checkedCount++;
 
             try
             {
@@ -486,15 +498,47 @@ class Program
             catch (FaultException<OrganizationServiceFault>)
             {
                 // This component type might not support RetrieveSolutionComponentLayers
-                // Skip silently
+                errorTypes[componentType] = errorTypes.GetValueOrDefault(componentType) + 1;
             }
             catch
             {
-                // Skip errors
+                // Skip other errors
+                errorTypes[componentType] = errorTypes.GetValueOrDefault(componentType) + 1;
             }
         }
 
-        Console.WriteLine($"\r  Checking component layers... done ({results.Count} with Active layer)          ");
+        Console.WriteLine($"\r  Checking component layers... done                                    ");
+        Console.WriteLine($"    Checked: {checkedCount}, Found with Active layer: {results.Count}");
+
+        // Report skipped types if any
+        if (skippedTypes.Count > 0)
+        {
+            int totalSkipped = skippedTypes.Values.Sum();
+            Console.WriteLine($"    Skipped {totalSkipped} components with unmapped types:");
+            foreach (var kvp in skippedTypes.OrderByDescending(x => x.Value).Take(5))
+            {
+                Console.WriteLine($"      - Type {kvp.Key} ({GetComponentTypeName(kvp.Key)}): {kvp.Value}");
+            }
+            if (skippedTypes.Count > 5)
+            {
+                Console.WriteLine($"      ... and {skippedTypes.Count - 5} more types");
+            }
+        }
+
+        // Report error types if any (usually means the API doesn't support that type)
+        if (errorTypes.Count > 0)
+        {
+            int totalErrors = errorTypes.Values.Sum();
+            Console.WriteLine($"    {totalErrors} components returned errors (API may not support these types):");
+            foreach (var kvp in errorTypes.OrderByDescending(x => x.Value).Take(5))
+            {
+                Console.WriteLine($"      - Type {kvp.Key} ({GetComponentTypeName(kvp.Key)}): {kvp.Value}");
+            }
+            if (errorTypes.Count > 5)
+            {
+                Console.WriteLine($"      ... and {errorTypes.Count - 5} more types");
+            }
+        }
 
         return results;
     }
@@ -743,6 +787,13 @@ class Program
                 return false;
             }
 
+            var logicalName = GetSolutionComponentLogicalName(componentType);
+            if (logicalName == null)
+            {
+                Console.WriteLine($"Error: Unsupported component type ({componentType}).");
+                return false;
+            }
+
             Console.WriteLine("Removing unmanaged layer...");
 
             // Use RemoveActiveCustomizations to remove the unmanaged layer
@@ -750,7 +801,7 @@ class Program
             {
                 Parameters =
                 {
-                    { "SolutionComponentName", GetSolutionComponentLogicalName(componentType) },
+                    { "SolutionComponentName", logicalName },
                     { "ComponentId", objectId }
                 }
             };
@@ -871,35 +922,115 @@ class Program
         };
     }
 
-    private static string GetSolutionComponentLogicalName(int componentType)
+    private static string? GetSolutionComponentLogicalName(int componentType)
     {
+        // Comprehensive mapping of solution component types to their logical names
+        // for use with RetrieveSolutionComponentLayers API
         return componentType switch
         {
+            // Core entity components
             1 => "entity",
             2 => "attribute",
             3 => "relationship",
             9 => "optionset",
             10 => "entityrelationship",
+            14 => "entitykey",
+
+            // Security
+            16 => "privilege",
             20 => "role",
+            70 => "fieldsecurityprofile",
+            71 => "fieldpermission",
+
+            // UI Components
             24 => "systemform",
             26 => "savedquery",
-            29 => "workflow",
-            31 => "report",
-            36 => "emailtemplate",
             59 => "savedqueryvisualization",
             60 => "systemform",
             61 => "webresource",
             62 => "sitemap",
             63 => "connectionrole",
+            64 => "complexcontrol",
+            65 => "hierarchyrule",
             66 => "customcontrol",
+            68 => "customcontroldefaultconfig",
             80 => "appmodule",
+
+            // Business Logic
+            29 => "workflow",
+            44 => "duplicaterule",
+            45 => "duplicaterulecondition",
+
+            // Templates
+            36 => "template",  // Email template
+            37 => "contracttemplate",
+            38 => "kbarticletemplate",
+            39 => "mailmergetemplate",
+
+            // Reports
+            31 => "report",
+            32 => "reportentity",
+            33 => "reportcategory",
+            34 => "reportvisibility",
+
+            // Plugins and SDK
             90 => "plugintype",
             91 => "pluginassembly",
             92 => "sdkmessageprocessingstep",
+            93 => "sdkmessageprocessingstepimage",
+            95 => "serviceendpoint",
+
+            // Mappings
+            46 => "entitymap",
+            47 => "attributemap",
+            208 => "importmap",
+
+            // Ribbon
+            48 => "ribboncommand",
+            49 => "ribboncontextgroup",
+            50 => "ribboncustomization",
+            52 => "ribbonrule",
+            53 => "ribbontabtocommandmap",
+            55 => "ribbondiff",
+
+            // Service Management
+            150 => "routingrule",
+            151 => "routingruleitem",
+            152 => "sla",
+            153 => "slaitem",
+            154 => "convertrule",
+            155 => "convertruleitem",
+
+            // Mobile
+            161 => "mobileofflineprofile",
+            162 => "mobileofflineprofileitem",
+
+            // Similarity
+            165 => "similarityrule",
+
+            // Canvas Apps and Modern Components
             300 => "canvasapp",
+            371 => "connector",
+            372 => "connector",
             380 => "environmentvariabledefinition",
             381 => "environmentvariablevalue",
-            _ => "entity"
+
+            // AI Components
+            400 => "aiprojecttype",
+            401 => "aiproject",
+            402 => "aiconfiguration",
+
+            // Analytics
+            430 => "entityanalyticsconfiguration",
+            431 => "attributeimageconfiguration",
+            432 => "entityimageconfiguration",
+
+            // SDK Messages (usually not customizable but included for completeness)
+            201 => "sdkmessage",
+            202 => "sdkmessagefilter",
+
+            // Return null for unsupported/unknown types - they will be skipped
+            _ => null
         };
     }
 }
