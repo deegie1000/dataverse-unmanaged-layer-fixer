@@ -560,7 +560,8 @@ class Program
             try
             {
                 // Use Web API to call RetrieveSolutionComponentLayers function
-                var apiUrl = $"api/data/v9.2/RetrieveSolutionComponentLayers(SolutionComponentName=@p1,ComponentId=@p2)" +
+                // Note: Leading slash ensures proper URL joining with base address
+                var apiUrl = $"/api/data/v9.2/RetrieveSolutionComponentLayers(SolutionComponentName=@p1,ComponentId=@p2)" +
                     $"?@p1='{componentLogicalName}'&@p2={objectId}";
 
                 var response = await _httpClient!.GetAsync(apiUrl);
@@ -612,7 +613,9 @@ class Program
                     if (errorTypes[componentType] == 1)
                     {
                         var errorContent = await response.Content.ReadAsStringAsync();
-                        Console.WriteLine($"\n    [DEBUG] First error for type {componentType} ({componentLogicalName}): {response.StatusCode} - {errorContent.Substring(0, Math.Min(200, errorContent.Length))}");
+                        Console.WriteLine($"\n    [DEBUG] First error for type {componentType} ({componentLogicalName}): {response.StatusCode}");
+                        Console.WriteLine($"    URL: {apiUrl}");
+                        Console.WriteLine($"    Error: {errorContent.Substring(0, Math.Min(500, errorContent.Length))}");
                     }
                 }
             }
