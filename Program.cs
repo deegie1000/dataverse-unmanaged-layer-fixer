@@ -598,20 +598,17 @@ class Program
             if (objectId == Guid.Empty)
                 continue;
 
+            // Skip entity-level components (type 1) - they appear in Active Solution when
+            // their subcomponents (forms, views, attributes) are customized, but the entity
+            // itself typically isn't the actual customization. Focus on the subcomponents.
+            if (componentType == 1)
+                continue;
+
             // Check if this component exists in the Active Solution (meaning it has unmanaged customizations)
             if (activeComponents.Contains((objectId, componentType)))
             {
                 // Get the logical name for removal
-                string? componentLogicalName;
-                if (componentType == 1)
-                {
-                    entityMetadataMap.TryGetValue(objectId, out componentLogicalName);
-                    componentLogicalName ??= "entity";
-                }
-                else
-                {
-                    componentLogicalName = GetSolutionComponentLogicalName(componentType) ?? "unknown";
-                }
+                string componentLogicalName = GetSolutionComponentLogicalName(componentType) ?? "unknown";
 
                 matchingComponents.Add((component, componentType, objectId, componentLogicalName));
             }
