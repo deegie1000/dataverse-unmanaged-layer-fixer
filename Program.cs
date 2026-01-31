@@ -560,71 +560,67 @@ class Program
             if (componentObjectIds.Count == 0)
                 return unmanagedComponents;
 
-            // Query the Default solution (unmanaged) for Power Pages site components
-            // that have the same powerpagesitecomponentid as the managed ones
-            // This indicates an unmanaged customization layer
-            var defaultSolutionQuery = new QueryExpression("solution")
-            {
-                ColumnSet = new ColumnSet("solutionid"),
-                Criteria = new FilterExpression
-                {
-                    Conditions =
-                    {
-                        new ConditionExpression("uniquename", ConditionOperator.Equal, "Default")
-                    }
-                }
-            };
-
-            var defaultSolution = await Task.Run(() => _serviceClient!.RetrieveMultiple(defaultSolutionQuery));
-            if (defaultSolution.Entities.Count == 0)
-                return unmanagedComponents;
-
-            var defaultSolutionId = defaultSolution.Entities[0].GetAttributeValue<Guid>("solutionid");
-
-            // Get components from the Default solution that match our Power Pages components
-            var unmanagedComponentQuery = new QueryExpression("solutioncomponent")
-            {
-                ColumnSet = new ColumnSet("objectid", "componenttype"),
-                Criteria = new FilterExpression
-                {
-                    Conditions =
-                    {
-                        new ConditionExpression("solutionid", ConditionOperator.Equal, defaultSolutionId),
-                        new ConditionExpression("objectid", ConditionOperator.In, componentObjectIds.ToArray())
-                    }
-                }
-            };
-
-            Console.Write($"\r  Checking Default solution for unmanaged components...    ");
-            var unmanagedSolutionComponents = await Task.Run(() => _serviceClient!.RetrieveMultiple(unmanagedComponentQuery));
-            Console.WriteLine($"\r  Found {unmanagedSolutionComponents.Entities.Count} Power Pages components in Default solution.    ");
-
-            // For each unmanaged component, get the actual Power Pages site component details
+            // For Power Pages components, we need to check each component's layers individually
+            // using the msdyn_componentlayerdatasource virtual entity or RetrieveSolutionComponentLayers
             int current = 0;
-            int total = unmanagedSolutionComponents.Entities.Count;
-            foreach (var comp in unmanagedSolutionComponents.Entities)
+            int total = componentObjectIds.Count;
+
+            foreach (var objectId in componentObjectIds)
             {
                 current++;
-                Console.Write($"\r  Retrieving component details... ({current}/{total})    ");
-                var objectId = comp.GetAttributeValue<Guid>("objectid");
+                if (current % 50 == 0 || current == total)
+                {
+                    Console.Write($"\r  Checking component layers... ({current}/{total})    ");
+                }
+
                 try
                 {
-                    var ppComponent = await Task.Run(() => _serviceClient!.Retrieve(
-                        "powerpagesitecomponent",
-                        objectId,
-                        new ColumnSet("powerpagesitecomponentid", "name", "powerpagesitecomponenttype",
-                            "modifiedon", "modifiedby", "powerpagesiteid")));
-                    unmanagedComponents.Add(ppComponent);
+                    // Use the function to retrieve layers for this specific component
+                    var layersRequest = new OrganizationRequest("RetrieveSolutionComponentLayers")
+                    {
+                        Parameters =
+                        {
+                            { "SolutionComponentName", "powerpagesitecomponent" },
+                            { "ComponentId", objectId }
+                        }
+                    };
+
+                    var layersResponse = await Task.Run(() => _serviceClient!.Execute(layersRequest));
+
+                    if (layersResponse.Results.Contains("SolutionComponentLayers"))
+                    {
+                        var layers = layersResponse.Results["SolutionComponentLayers"] as EntityCollection;
+                        if (layers != null)
+                        {
+                            // Check if there's an Active (unmanaged) layer
+                            var hasActiveLayer = layers.Entities.Any(l =>
+                                l.GetAttributeValue<string>("msdyn_solutionname") == "Active");
+
+                            if (hasActiveLayer)
+                            {
+                                // Get the component details
+                                var ppComponent = await Task.Run(() => _serviceClient!.Retrieve(
+                                    "powerpagesitecomponent",
+                                    objectId,
+                                    new ColumnSet("powerpagesitecomponentid", "name", "powerpagesitecomponenttype",
+                                        "modifiedon", "modifiedby", "powerpagesiteid")));
+                                unmanagedComponents.Add(ppComponent);
+                            }
+                        }
+                    }
+                }
+                catch (FaultException<OrganizationServiceFault>)
+                {
+                    // RetrieveSolutionComponentLayers might not be available, try alternative method
+                    // Skip this component
                 }
                 catch
                 {
                     // Component might not exist or we don't have access
                 }
             }
-            if (total > 0)
-            {
-                Console.WriteLine($"\r  Retrieving component details... done ({unmanagedComponents.Count} retrieved)    ");
-            }
+
+            Console.WriteLine($"\r  Checking component layers... done ({unmanagedComponents.Count} with Active layer)    ");
         }
         catch (Exception ex)
         {
