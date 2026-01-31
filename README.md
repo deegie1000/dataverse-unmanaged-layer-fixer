@@ -157,24 +157,34 @@ dotnet run
      Total unmanaged layers removed: 3
    ```
 
-7. **Excel Export**: After processing, you'll be prompted to export results:
+7. **Multiple Solutions**: After completing a solution, you'll be prompted:
    ```
-   Do you want to export results to Excel? (y/n): y
-   Results exported to: MySolution_UnmanagedLayers_20240115_143022.xlsx
+   Do you want to check another solution? (y/n):
    ```
 
+8. **Excel Export**: After you're done processing solutions (when you answer "n" to checking another solution), you'll be prompted to export all results:
+   ```
+   Found 25 unmanaged customizations across 2 solution(s).
+   Do you want to export results to Excel? (y/n): y
+
+   Default filename: D365-Solution-Active-Layers-20240115_143022.xlsx
+   Enter file path (or press Enter for default):
+   Results exported to: D365-Solution-Active-Layers-20240115_143022.xlsx
+   ```
+
+   You can:
+   - Press Enter to use the default filename in the current directory
+   - Enter a full file path (e.g., `C:\Reports\my-export.xlsx`)
+   - Enter just a directory path to use the default filename in that directory
+
    The Excel file includes:
+   - **One worksheet per solution** (worksheet name = solution name)
    - Component name, type, and ID
    - Entity name (for entity subcomponents)
    - Modified on/by information
    - Removal status (Removed, Skipped, or Removal Failed)
    - Color-coded status cells (green=removed, yellow=skipped, red=failed)
-   - Summary statistics
-
-8. **Multiple Solutions**: After completing a solution, you'll be prompted:
-   ```
-   Do you want to check another solution? (y/n):
-   ```
+   - Summary statistics per solution
 
 ## Power Pages Support
 

@@ -71,6 +71,9 @@ class Program
         // Initialize HttpClient for Web API calls
         InitializeHttpClient();
 
+        // Track results across all solutions for export
+        var allSolutionResults = new Dictionary<string, List<ComponentResult>>();
+
         // Main loop - allow processing multiple solutions
         bool continueProcessing = true;
         while (continueProcessing)
@@ -85,13 +88,64 @@ class Program
             // Clear the solution name after first use (so user can select interactively next time)
             solutionName = null;
 
-            await ProcessSolutionComponentsAsync(solution);
+            var solutionFriendlyName = solution.GetAttributeValue<string>("friendlyname") ?? "Unknown";
+            var results = await ProcessSolutionComponentsAsync(solution);
+
+            if (results.Count > 0)
+            {
+                allSolutionResults[solutionFriendlyName] = results;
+            }
 
             Console.WriteLine();
             Console.Write("Do you want to check another solution? (y/n): ");
             string? response = Console.ReadLine()?.Trim().ToLower();
             continueProcessing = response == "y" || response == "yes";
             Console.WriteLine();
+        }
+
+        // Prompt for Excel export if there are any results
+        if (allSolutionResults.Count > 0)
+        {
+            int totalComponents = allSolutionResults.Values.Sum(r => r.Count);
+            Console.WriteLine($"Found {totalComponents} unmanaged customizations across {allSolutionResults.Count} solution(s).");
+            Console.Write("Do you want to export results to Excel? (y/n): ");
+            string? exportResponse = Console.ReadLine()?.Trim().ToLower();
+
+            if (exportResponse == "y" || exportResponse == "yes")
+            {
+                var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                var defaultFileName = $"D365-Solution-Active-Layers-{timestamp}.xlsx";
+
+                Console.WriteLine();
+                Console.WriteLine($"Default filename: {defaultFileName}");
+                Console.Write("Enter file path (or press Enter for default): ");
+                string? customPath = Console.ReadLine()?.Trim();
+
+                string filePath;
+                if (string.IsNullOrWhiteSpace(customPath))
+                {
+                    filePath = defaultFileName;
+                }
+                else
+                {
+                    // If user provided just a directory, append the default filename
+                    if (Directory.Exists(customPath))
+                    {
+                        filePath = Path.Combine(customPath, defaultFileName);
+                    }
+                    else
+                    {
+                        filePath = customPath;
+                        // Ensure it has .xlsx extension
+                        if (!filePath.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
+                        {
+                            filePath += ".xlsx";
+                        }
+                    }
+                }
+
+                ExportResultsToExcel(allSolutionResults, filePath);
+            }
         }
 
         Console.WriteLine("Processing complete. Press any key to exit.");
@@ -241,11 +295,10 @@ class Program
         }
     }
 
-    private static async Task ProcessSolutionComponentsAsync(Entity solution)
+    private static async Task<List<ComponentResult>> ProcessSolutionComponentsAsync(Entity solution)
     {
         Guid solutionId = solution.GetAttributeValue<Guid>("solutionid");
         string solutionName = solution.GetAttributeValue<string>("friendlyname") ?? "Unknown";
-        string solutionUniqueName = solution.GetAttributeValue<string>("uniquename") ?? "Unknown";
 
         Console.WriteLine();
         Console.WriteLine($"Processing solution: {solutionName}");
@@ -322,7 +375,7 @@ class Program
         if (totalUnmanagedCount == 0)
         {
             Console.WriteLine("No unmanaged layers found for this solution's components.");
-            return;
+            return componentResults;
         }
 
         int layersRemoved = 0;
@@ -546,18 +599,7 @@ class Program
         Console.WriteLine($"  Power Pages components with unmanaged customizations: {unmanagedPowerPagesComponents.Count}");
         Console.WriteLine($"  Total unmanaged layers removed: {layersRemoved + powerPagesRemoved}");
 
-        // Prompt for Excel export
-        if (componentResults.Count > 0)
-        {
-            Console.WriteLine();
-            Console.Write("Do you want to export results to Excel? (y/n): ");
-            string? exportResponse = Console.ReadLine()?.Trim().ToLower();
-
-            if (exportResponse == "y" || exportResponse == "yes")
-            {
-                ExportResultsToExcel(componentResults, solutionUniqueName, solutionName);
-            }
-        }
+        return componentResults;
     }
 
     private static async Task<List<Entity>> RetrieveAllComponentsAsync(Guid solutionId)
@@ -1645,95 +1687,109 @@ class Program
         };
     }
 
-    private static void ExportResultsToExcel(List<ComponentResult> results, string solutionUniqueName, string solutionFriendlyName)
+    private static void ExportResultsToExcel(Dictionary<string, List<ComponentResult>> allResults, string filePath)
     {
         try
         {
-            // Sanitize the solution name for use as a filename
-            var invalidChars = Path.GetInvalidFileNameChars();
-            var sanitizedName = new string(solutionUniqueName
-                .Select(c => invalidChars.Contains(c) ? '_' : c)
-                .ToArray());
-
-            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            var fileName = $"{sanitizedName}_UnmanagedLayers_{timestamp}.xlsx";
+            // Ensure the directory exists
+            var directory = Path.GetDirectoryName(filePath);
+            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
 
             using var workbook = new XLWorkbook();
-            var worksheet = workbook.Worksheets.Add("Unmanaged Customizations");
 
-            // Add title
-            worksheet.Cell(1, 1).Value = $"Unmanaged Customizations Report - {solutionFriendlyName}";
-            worksheet.Cell(1, 1).Style.Font.Bold = true;
-            worksheet.Cell(1, 1).Style.Font.FontSize = 14;
-            worksheet.Range(1, 1, 1, 8).Merge();
+            // Characters not allowed in Excel worksheet names
+            var invalidWorksheetChars = new[] { ':', '\\', '/', '?', '*', '[', ']' };
 
-            worksheet.Cell(2, 1).Value = $"Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
-            worksheet.Range(2, 1, 2, 8).Merge();
-
-            // Add headers
-            int headerRow = 4;
-            var headers = new[] { "Component Name", "Component Type", "Component ID", "Entity", "Solution Layer", "Modified On", "Modified By", "Removal Status" };
-            for (int i = 0; i < headers.Length; i++)
+            foreach (var (solutionName, results) in allResults)
             {
-                worksheet.Cell(headerRow, i + 1).Value = headers[i];
-                worksheet.Cell(headerRow, i + 1).Style.Font.Bold = true;
-                worksheet.Cell(headerRow, i + 1).Style.Fill.BackgroundColor = XLColor.LightGray;
-                worksheet.Cell(headerRow, i + 1).Style.Border.BottomBorder = XLBorderStyleValues.Thin;
+                // Sanitize the solution name for use as a worksheet name (max 31 chars)
+                var sanitizedSheetName = new string(solutionName
+                    .Select(c => invalidWorksheetChars.Contains(c) ? '_' : c)
+                    .ToArray());
+                if (sanitizedSheetName.Length > 31)
+                {
+                    sanitizedSheetName = sanitizedSheetName.Substring(0, 31);
+                }
+
+                var worksheet = workbook.Worksheets.Add(sanitizedSheetName);
+
+                // Add title
+                worksheet.Cell(1, 1).Value = $"Unmanaged Customizations Report - {solutionName}";
+                worksheet.Cell(1, 1).Style.Font.Bold = true;
+                worksheet.Cell(1, 1).Style.Font.FontSize = 14;
+                worksheet.Range(1, 1, 1, 8).Merge();
+
+                worksheet.Cell(2, 1).Value = $"Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
+                worksheet.Range(2, 1, 2, 8).Merge();
+
+                // Add headers
+                int headerRow = 4;
+                var headers = new[] { "Component Name", "Component Type", "Component ID", "Entity", "Solution Layer", "Modified On", "Modified By", "Removal Status" };
+                for (int i = 0; i < headers.Length; i++)
+                {
+                    worksheet.Cell(headerRow, i + 1).Value = headers[i];
+                    worksheet.Cell(headerRow, i + 1).Style.Font.Bold = true;
+                    worksheet.Cell(headerRow, i + 1).Style.Fill.BackgroundColor = XLColor.LightGray;
+                    worksheet.Cell(headerRow, i + 1).Style.Border.BottomBorder = XLBorderStyleValues.Thin;
+                }
+
+                // Add data
+                int dataRow = headerRow + 1;
+                foreach (var result in results)
+                {
+                    worksheet.Cell(dataRow, 1).Value = result.ComponentName;
+                    worksheet.Cell(dataRow, 2).Value = result.ComponentType;
+                    worksheet.Cell(dataRow, 3).Value = result.ComponentId.ToString();
+                    worksheet.Cell(dataRow, 4).Value = result.EntityName;
+                    worksheet.Cell(dataRow, 5).Value = result.SolutionLayer;
+                    worksheet.Cell(dataRow, 6).Value = result.ModifiedOn?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A";
+                    worksheet.Cell(dataRow, 7).Value = result.ModifiedBy;
+                    worksheet.Cell(dataRow, 8).Value = result.RemovalStatus;
+
+                    // Color-code the removal status
+                    var statusCell = worksheet.Cell(dataRow, 8);
+                    if (result.RemovalStatus == "Removed")
+                    {
+                        statusCell.Style.Fill.BackgroundColor = XLColor.LightGreen;
+                    }
+                    else if (result.RemovalStatus == "Removal Failed")
+                    {
+                        statusCell.Style.Fill.BackgroundColor = XLColor.LightCoral;
+                    }
+                    else
+                    {
+                        statusCell.Style.Fill.BackgroundColor = XLColor.LightYellow;
+                    }
+
+                    dataRow++;
+                }
+
+                // Auto-fit columns
+                worksheet.Columns().AdjustToContents();
+
+                // Add summary
+                int summaryRow = dataRow + 2;
+                worksheet.Cell(summaryRow, 1).Value = "Summary:";
+                worksheet.Cell(summaryRow, 1).Style.Font.Bold = true;
+
+                int removedCount = results.Count(r => r.WasRemoved);
+                int skippedCount = results.Count(r => !r.WasRemoved && r.RemovalStatus != "Removal Failed");
+                int failedCount = results.Count(r => r.RemovalStatus == "Removal Failed");
+
+                worksheet.Cell(summaryRow + 1, 1).Value = $"Total Components: {results.Count}";
+                worksheet.Cell(summaryRow + 2, 1).Value = $"Removed: {removedCount}";
+                worksheet.Cell(summaryRow + 3, 1).Value = $"Skipped: {skippedCount}";
+                worksheet.Cell(summaryRow + 4, 1).Value = $"Failed: {failedCount}";
             }
-
-            // Add data
-            int dataRow = headerRow + 1;
-            foreach (var result in results)
-            {
-                worksheet.Cell(dataRow, 1).Value = result.ComponentName;
-                worksheet.Cell(dataRow, 2).Value = result.ComponentType;
-                worksheet.Cell(dataRow, 3).Value = result.ComponentId.ToString();
-                worksheet.Cell(dataRow, 4).Value = result.EntityName;
-                worksheet.Cell(dataRow, 5).Value = result.SolutionLayer;
-                worksheet.Cell(dataRow, 6).Value = result.ModifiedOn?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A";
-                worksheet.Cell(dataRow, 7).Value = result.ModifiedBy;
-                worksheet.Cell(dataRow, 8).Value = result.RemovalStatus;
-
-                // Color-code the removal status
-                var statusCell = worksheet.Cell(dataRow, 8);
-                if (result.RemovalStatus == "Removed")
-                {
-                    statusCell.Style.Fill.BackgroundColor = XLColor.LightGreen;
-                }
-                else if (result.RemovalStatus == "Removal Failed")
-                {
-                    statusCell.Style.Fill.BackgroundColor = XLColor.LightCoral;
-                }
-                else
-                {
-                    statusCell.Style.Fill.BackgroundColor = XLColor.LightYellow;
-                }
-
-                dataRow++;
-            }
-
-            // Auto-fit columns
-            worksheet.Columns().AdjustToContents();
-
-            // Add summary
-            int summaryRow = dataRow + 2;
-            worksheet.Cell(summaryRow, 1).Value = "Summary:";
-            worksheet.Cell(summaryRow, 1).Style.Font.Bold = true;
-
-            int removedCount = results.Count(r => r.WasRemoved);
-            int skippedCount = results.Count(r => !r.WasRemoved && r.RemovalStatus != "Removal Failed");
-            int failedCount = results.Count(r => r.RemovalStatus == "Removal Failed");
-
-            worksheet.Cell(summaryRow + 1, 1).Value = $"Total Components: {results.Count}";
-            worksheet.Cell(summaryRow + 2, 1).Value = $"Removed: {removedCount}";
-            worksheet.Cell(summaryRow + 3, 1).Value = $"Skipped: {skippedCount}";
-            worksheet.Cell(summaryRow + 4, 1).Value = $"Failed: {failedCount}";
 
             // Save the file
-            workbook.SaveAs(fileName);
+            workbook.SaveAs(filePath);
 
             Console.WriteLine();
-            Console.WriteLine($"Results exported to: {Path.GetFullPath(fileName)}");
+            Console.WriteLine($"Results exported to: {Path.GetFullPath(filePath)}");
         }
         catch (Exception ex)
         {
