@@ -175,13 +175,17 @@ dotnet run
    - The dialog defaults to your Documents folder
 
    The Excel file includes:
-   - **One worksheet per solution** (worksheet name = solution name)
-   - Component name, type, and ID
-   - Entity name (for entity subcomponents)
-   - Modified on/by information
-   - Removal status (Removed, Skipped, or Removal Failed)
-   - Color-coded status cells (green=removed, yellow=skipped, red=failed)
-   - Summary statistics per solution
+   - **Summary worksheet** (first sheet) with:
+     - Overall statistics (total solutions, components, removed/skipped/failed counts)
+     - Breakdown by solution table
+     - Breakdown by component type table
+   - **One worksheet per solution** (worksheet name = solution name) with:
+     - Component name, type, and ID
+     - Entity name (for entity subcomponents)
+     - Modified on/by information
+     - Removal status (Removed, Skipped, or Removal Failed)
+     - Color-coded status cells (green=removed, yellow=skipped, red=failed)
+     - Summary statistics for that solution
 
 ## Power Pages Support
 

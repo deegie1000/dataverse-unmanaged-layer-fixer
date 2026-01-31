@@ -1718,6 +1718,111 @@ class Program
             // Characters not allowed in Excel worksheet names
             var invalidWorksheetChars = new[] { ':', '\\', '/', '?', '*', '[', ']' };
 
+            // Create Summary worksheet first
+            var summarySheet = workbook.Worksheets.Add("Summary");
+
+            // Title
+            summarySheet.Cell(1, 1).Value = "Unmanaged Customizations Report - Summary";
+            summarySheet.Cell(1, 1).Style.Font.Bold = true;
+            summarySheet.Cell(1, 1).Style.Font.FontSize = 16;
+            summarySheet.Range(1, 1, 1, 5).Merge();
+
+            summarySheet.Cell(2, 1).Value = $"Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
+            summarySheet.Range(2, 1, 2, 5).Merge();
+
+            // Calculate overall totals
+            var allComponents = allResults.Values.SelectMany(r => r).ToList();
+            int totalComponents = allComponents.Count;
+            int totalRemoved = allComponents.Count(r => r.WasRemoved);
+            int totalSkipped = allComponents.Count(r => !r.WasRemoved && r.RemovalStatus != "Removal Failed");
+            int totalFailed = allComponents.Count(r => r.RemovalStatus == "Removal Failed");
+
+            // Overall Statistics
+            summarySheet.Cell(4, 1).Value = "Overall Statistics";
+            summarySheet.Cell(4, 1).Style.Font.Bold = true;
+            summarySheet.Cell(4, 1).Style.Font.FontSize = 12;
+
+            summarySheet.Cell(5, 1).Value = "Total Solutions Processed:";
+            summarySheet.Cell(5, 2).Value = allResults.Count;
+            summarySheet.Cell(6, 1).Value = "Total Unmanaged Customizations:";
+            summarySheet.Cell(6, 2).Value = totalComponents;
+            summarySheet.Cell(7, 1).Value = "Total Removed:";
+            summarySheet.Cell(7, 2).Value = totalRemoved;
+            summarySheet.Cell(7, 2).Style.Fill.BackgroundColor = XLColor.LightGreen;
+            summarySheet.Cell(8, 1).Value = "Total Skipped:";
+            summarySheet.Cell(8, 2).Value = totalSkipped;
+            summarySheet.Cell(8, 2).Style.Fill.BackgroundColor = XLColor.LightYellow;
+            summarySheet.Cell(9, 1).Value = "Total Failed:";
+            summarySheet.Cell(9, 2).Value = totalFailed;
+            summarySheet.Cell(9, 2).Style.Fill.BackgroundColor = XLColor.LightCoral;
+
+            // Breakdown by Solution
+            summarySheet.Cell(11, 1).Value = "Breakdown by Solution";
+            summarySheet.Cell(11, 1).Style.Font.Bold = true;
+            summarySheet.Cell(11, 1).Style.Font.FontSize = 12;
+
+            var solutionHeaders = new[] { "Solution", "Total", "Removed", "Skipped", "Failed" };
+            for (int i = 0; i < solutionHeaders.Length; i++)
+            {
+                summarySheet.Cell(12, i + 1).Value = solutionHeaders[i];
+                summarySheet.Cell(12, i + 1).Style.Font.Bold = true;
+                summarySheet.Cell(12, i + 1).Style.Fill.BackgroundColor = XLColor.LightGray;
+                summarySheet.Cell(12, i + 1).Style.Border.BottomBorder = XLBorderStyleValues.Thin;
+            }
+
+            int solutionRow = 13;
+            foreach (var (solutionName, results) in allResults)
+            {
+                int removed = results.Count(r => r.WasRemoved);
+                int skipped = results.Count(r => !r.WasRemoved && r.RemovalStatus != "Removal Failed");
+                int failed = results.Count(r => r.RemovalStatus == "Removal Failed");
+
+                summarySheet.Cell(solutionRow, 1).Value = solutionName;
+                summarySheet.Cell(solutionRow, 2).Value = results.Count;
+                summarySheet.Cell(solutionRow, 3).Value = removed;
+                summarySheet.Cell(solutionRow, 4).Value = skipped;
+                summarySheet.Cell(solutionRow, 5).Value = failed;
+                solutionRow++;
+            }
+
+            // Breakdown by Component Type
+            int typeStartRow = solutionRow + 2;
+            summarySheet.Cell(typeStartRow, 1).Value = "Breakdown by Component Type";
+            summarySheet.Cell(typeStartRow, 1).Style.Font.Bold = true;
+            summarySheet.Cell(typeStartRow, 1).Style.Font.FontSize = 12;
+
+            var typeHeaders = new[] { "Component Type", "Total", "Removed", "Skipped", "Failed" };
+            for (int i = 0; i < typeHeaders.Length; i++)
+            {
+                summarySheet.Cell(typeStartRow + 1, i + 1).Value = typeHeaders[i];
+                summarySheet.Cell(typeStartRow + 1, i + 1).Style.Font.Bold = true;
+                summarySheet.Cell(typeStartRow + 1, i + 1).Style.Fill.BackgroundColor = XLColor.LightGray;
+                summarySheet.Cell(typeStartRow + 1, i + 1).Style.Border.BottomBorder = XLBorderStyleValues.Thin;
+            }
+
+            var componentTypeGroups = allComponents
+                .GroupBy(c => c.ComponentType)
+                .OrderByDescending(g => g.Count());
+
+            int typeRow = typeStartRow + 2;
+            foreach (var group in componentTypeGroups)
+            {
+                int removed = group.Count(r => r.WasRemoved);
+                int skipped = group.Count(r => !r.WasRemoved && r.RemovalStatus != "Removal Failed");
+                int failed = group.Count(r => r.RemovalStatus == "Removal Failed");
+
+                summarySheet.Cell(typeRow, 1).Value = group.Key;
+                summarySheet.Cell(typeRow, 2).Value = group.Count();
+                summarySheet.Cell(typeRow, 3).Value = removed;
+                summarySheet.Cell(typeRow, 4).Value = skipped;
+                summarySheet.Cell(typeRow, 5).Value = failed;
+                typeRow++;
+            }
+
+            // Auto-fit columns on summary sheet
+            summarySheet.Columns().AdjustToContents();
+
+            // Create individual solution worksheets
             foreach (var (solutionName, results) in allResults)
             {
                 // Sanitize the solution name for use as a worksheet name (max 31 chars)
