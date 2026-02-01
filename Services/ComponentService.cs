@@ -529,17 +529,17 @@ public class ComponentService
         // Check forms (type 60)
         Console.Write("\r  Checking forms with Active layers...                    ");
         await CheckEntitySubcomponentsForActiveLayers("systemform", "formid", "objecttypecode", "name",
-            entityNames, "System Form", 60, results);
+            entityNames, "SystemForm", 60, results);
 
         // Check views (type 26)
         Console.Write("\r  Checking views with Active layers...                    ");
         await CheckEntitySubcomponentsForActiveLayers("savedquery", "savedqueryid", "returnedtypecode", "name",
-            entityNames, "Saved Query", 26, results);
+            entityNames, "SavedQuery", 26, results);
 
         // Check charts (type 59)
         Console.Write("\r  Checking charts with Active layers...                   ");
         await CheckEntitySubcomponentsForActiveLayers("savedqueryvisualization", "savedqueryvisualizationid",
-            "primaryentitytypecode", "name", entityNames, "System Chart", 59, results);
+            "primaryentitytypecode", "name", entityNames, "SavedQueryVisualization", 59, results);
 
         // Check attributes (type 2)
         Console.Write("\r  Checking attributes with Active layers...               ");
