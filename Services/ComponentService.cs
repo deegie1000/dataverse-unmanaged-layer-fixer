@@ -781,7 +781,14 @@ public class ComponentService
             var (component, layer, logicalName) = matchingLayers[i];
             var componentType = component.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
             var componentName = layer.GetAttributeValue<string>("msdyn_name") ?? "Unknown";
-            var componentId = layer.GetAttributeValue<string>("msdyn_componentid") ?? "";
+            // msdyn_componentid can be either Guid or string depending on context
+            var componentIdRaw = layer.Attributes.Contains("msdyn_componentid") ? layer["msdyn_componentid"] : null;
+            var componentId = componentIdRaw switch
+            {
+                Guid g => g.ToString(),
+                string s => s,
+                _ => ""
+            };
             var entityName = component.GetAttributeValue<string>("_entityname") ?? "";
             var modifiedOn = layer.GetAttributeValue<DateTime?>("msdyn_overwritetime");
             var modifiedBy = layer.GetAttributeValue<string>("msdyn_publishername") ?? "Unknown";
@@ -1030,9 +1037,18 @@ public class ComponentService
     {
         try
         {
-            var componentId = layer.GetAttributeValue<string>("msdyn_componentid") ?? "";
-
-            if (!Guid.TryParse(componentId, out var objectId))
+            // msdyn_componentid can be either Guid or string depending on context
+            var componentIdRaw = layer.Attributes.Contains("msdyn_componentid") ? layer["msdyn_componentid"] : null;
+            Guid objectId;
+            if (componentIdRaw is Guid g)
+            {
+                objectId = g;
+            }
+            else if (componentIdRaw is string s && Guid.TryParse(s, out var parsed))
+            {
+                objectId = parsed;
+            }
+            else
             {
                 Console.WriteLine("Error: Invalid component ID.");
                 return false;
