@@ -599,7 +599,17 @@ public class ComponentService
             .Where(id => id != Guid.Empty)
             .ToHashSet();
 
+        if (managedComponentIds.Count == 0)
+            return new List<Entity>();
+
+        // Get Power Pages component types from the managed solution for filtering
+        var managedComponentTypes = powerPagesComponents
+            .Select(c => c.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0)
+            .Where(t => t != 0)
+            .ToHashSet();
+
         // Get Power Pages components that are in the Active Solution (have unmanaged customizations)
+        // Filter by BOTH objectid AND component type to avoid false positives
         var activeQuery = new QueryExpression("solutioncomponent")
         {
             ColumnSet = new ColumnSet("objectid", "componenttype"),
@@ -608,7 +618,8 @@ public class ComponentService
                 Conditions =
                 {
                     new ConditionExpression("solutionid", ConditionOperator.Equal, activeSolutionId),
-                    new ConditionExpression("objectid", ConditionOperator.In, managedComponentIds.Cast<object>().ToArray())
+                    new ConditionExpression("objectid", ConditionOperator.In, managedComponentIds.Cast<object>().ToArray()),
+                    new ConditionExpression("componenttype", ConditionOperator.In, managedComponentTypes.Cast<object>().ToArray())
                 }
             }
         };
