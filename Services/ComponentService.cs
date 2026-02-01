@@ -9,6 +9,15 @@ using System.ServiceModel;
 namespace DataverseUnmanagedLayerFixer.Services;
 
 /// <summary>
+/// Holds mutable state for processing (workaround for async methods not supporting ref parameters).
+/// </summary>
+public class ProcessingState
+{
+    public bool RemoveAll { get; set; }
+    public bool SkipAll { get; set; }
+}
+
+/// <summary>
 /// Service for processing solution components and detecting unmanaged layers.
 /// </summary>
 public class ComponentService
@@ -66,16 +75,15 @@ public class ComponentService
 
         // Process components
         int layersRemoved = 0;
-        bool removeAll = false;
-        bool skipAll = exportOnly;
+        var state = new ProcessingState { RemoveAll = false, SkipAll = exportOnly };
 
         // Process standard components
         layersRemoved += await ProcessStandardComponentsAsync(
-            matchingLayers, componentResults, exportOnly, ref removeAll, ref skipAll);
+            matchingLayers, componentResults, exportOnly, state);
 
         // Process Power Pages components
         int powerPagesRemoved = await ProcessPowerPagesComponentsAsync(
-            unmanagedPowerPages, componentResults, exportOnly, ref removeAll, ref skipAll);
+            unmanagedPowerPages, componentResults, exportOnly, state);
 
         // Print summary
         PrintSummary(matchingLayers.Count, unmanagedPowerPages.Count, layersRemoved + powerPagesRemoved);
@@ -598,8 +606,7 @@ public class ComponentService
         List<(Entity Component, Entity Layer, string LogicalName)> matchingLayers,
         List<ComponentResult> componentResults,
         bool exportOnly,
-        ref bool removeAll,
-        ref bool skipAll)
+        ProcessingState state)
     {
         int layersRemoved = 0;
 
@@ -624,7 +631,7 @@ public class ComponentService
             else
             {
                 (wasRemoved, removalStatus, layersRemoved) = await HandleComponentRemovalAsync(
-                    layer, logicalName, componentType, ref removeAll, ref skipAll, layersRemoved);
+                    layer, logicalName, componentType, state, layersRemoved);
             }
 
             componentResults.Add(new ComponentResult(
@@ -647,15 +654,14 @@ public class ComponentService
         List<Entity> unmanagedComponents,
         List<ComponentResult> componentResults,
         bool exportOnly,
-        ref bool removeAll,
-        ref bool skipAll)
+        ProcessingState state)
     {
         if (unmanagedComponents.Count == 0)
             return 0;
 
         int removed = 0;
 
-        if (!exportOnly && !skipAll && !removeAll)
+        if (!exportOnly && !state.SkipAll && !state.RemoveAll)
         {
             Console.WriteLine();
             Console.WriteLine("===========================================");
@@ -685,7 +691,7 @@ public class ComponentService
             if (!exportOnly)
             {
                 (wasRemoved, removalStatus, removed) = await HandlePowerPagesRemovalAsync(
-                    ppComponent, ref removeAll, ref skipAll, removed);
+                    ppComponent, state, removed);
             }
 
             componentResults.Add(new ComponentResult(
@@ -706,14 +712,14 @@ public class ComponentService
 
     private async Task<(bool WasRemoved, string Status, int TotalRemoved)> HandleComponentRemovalAsync(
         Entity layer, string logicalName, int componentType,
-        ref bool removeAll, ref bool skipAll, int totalRemoved)
+        ProcessingState state, int totalRemoved)
     {
         DisplayLayerInfo(layer, componentType);
 
-        if (skipAll)
+        if (state.SkipAll)
             return (false, "Skipped (Skip All)", totalRemoved);
 
-        if (removeAll)
+        if (state.RemoveAll)
         {
             Console.WriteLine("Auto-removing unmanaged layer...");
             var removed = await RemoveUnmanagedLayerAsync(layer, logicalName);
@@ -730,12 +736,12 @@ public class ComponentService
         {
             case "s":
                 Console.WriteLine("Skipping remaining layers.");
-                skipAll = true;
+                state.SkipAll = true;
                 Console.WriteLine();
                 return (false, "Skipped (Skip All)", totalRemoved);
 
             case "a":
-                removeAll = true;
+                state.RemoveAll = true;
                 var removedA = await RemoveUnmanagedLayerAsync(layer, logicalName);
                 Console.WriteLine();
                 return removedA
@@ -757,14 +763,14 @@ public class ComponentService
     }
 
     private async Task<(bool WasRemoved, string Status, int TotalRemoved)> HandlePowerPagesRemovalAsync(
-        Entity ppComponent, ref bool removeAll, ref bool skipAll, int totalRemoved)
+        Entity ppComponent, ProcessingState state, int totalRemoved)
     {
         DisplayPowerPagesComponentInfo(ppComponent);
 
-        if (skipAll)
+        if (state.SkipAll)
             return (false, "Skipped (Skip All)", totalRemoved);
 
-        if (removeAll)
+        if (state.RemoveAll)
         {
             Console.WriteLine("Auto-removing Power Pages unmanaged customization...");
             var removed = await RemovePowerPagesCustomizationAsync(ppComponent);
@@ -781,12 +787,12 @@ public class ComponentService
         {
             case "s":
                 Console.WriteLine("Skipping remaining components.");
-                skipAll = true;
+                state.SkipAll = true;
                 Console.WriteLine();
                 return (false, "Skipped (Skip All)", totalRemoved);
 
             case "a":
-                removeAll = true;
+                state.RemoveAll = true;
                 var removedA = await RemovePowerPagesCustomizationAsync(ppComponent);
                 Console.WriteLine();
                 return removedA
