@@ -132,35 +132,9 @@ dotnet run
    - After scanning, you're prompted to export results to Excel
    - This is useful for auditing or reporting without making any changes
 
-4. **Layer Differences**: You'll be asked if you want to compare layers:
-   ```
-   Show layer differences for forms/views? (y/n): y
-   Layer differences will be calculated for forms and views.
-   ```
+4. **Component Scanning**: After selecting solution(s), the tool scans all components and checks for unmanaged layers.
 
-   When enabled, the tool **compares the Active (unmanaged) layer with the managed layer immediately below it** to show what was actually changed. The comparison retrieves the component definition from both layers and identifies:
-
-   - **Forms**: Added/removed tabs, sections, fields, controls; visibility changes; event handler changes
-   - **Views**: Added/removed query columns, filter condition changes, linked entity changes, sort order changes, visible column changes, column width changes
-   - **Charts**: Data definition changes, chart type/presentation changes
-   - **Other components**: Property additions, removals, and value modifications
-
-   Example output in the spreadsheet:
-   ```
-   [vs Contoso Solution] +Tabs: Summary; +Fields: new_customfield, new_rating; -Sections: 2; Filters: 3 → 5
-   ```
-
-   This shows the component was compared against the "Contoso Solution" managed layer and displays:
-   - `+Tabs: Summary` - A tab named "Summary" was added
-   - `+Fields: new_customfield, new_rating` - These fields were added to the form
-   - `-Sections: 2` - Two sections were removed
-   - `Filters: 3 → 5` - Filter conditions increased from 3 to 5
-
-   This information is included in the Excel export as a "Component Details" column.
-
-5. **Component Scanning**: After selecting solution(s), the tool scans all components and checks for unmanaged layers.
-
-6. **Layer Review**: For each component with an unmanaged layer, you'll see details like:
+5. **Layer Review**: For each component with an unmanaged layer, you'll see details like:
    ```
    ===========================================
      UNMANAGED LAYER FOUND
@@ -193,13 +167,13 @@ dotnet run
      ...
    ```
 
-7. **Removal Options** (skipped in export-only mode):
+6. **Removal Options** (skipped in export-only mode):
    - `y` - Remove this specific unmanaged layer
    - `n` - Skip this layer and continue to the next
    - `a` - Automatically remove all remaining unmanaged layers
    - `s` - Skip all remaining components and finish
 
-8. **Summary**: After processing, you'll see a summary:
+7. **Summary**: After processing, you'll see a summary:
    ```
    -------------------------------------------
    Summary:
@@ -208,12 +182,12 @@ dotnet run
      Total unmanaged layers removed: 3
    ```
 
-9. **Multiple Solutions**: After completing a solution (when not in export-only mode), you'll be prompted:
+8. **Multiple Solutions**: After completing a solution (when not in export-only mode), you'll be prompted:
    ```
    Do you want to check more solutions? (y/n):
    ```
 
-10. **Excel Export**: After you're done processing solutions (when you answer "n" to checking another solution, or immediately after scanning in export-only mode), you'll be prompted to export all results:
+9. **Excel Export**: After you're done processing solutions (when you answer "n" to checking another solution, or immediately after scanning in export-only mode), you'll be prompted to export all results:
    ```
    Found 25 unmanaged customizations across 2 solution(s).
    Do you want to export results to Excel? (y/n): y
@@ -237,7 +211,6 @@ dotnet run
      - Modified on/by information
      - Removal status (Removed, Skipped, or Removal Failed)
      - Color-coded status cells (green=removed, yellow=skipped, red=failed)
-     - Component Details (if layer differences were enabled) - shows the actual differences between the Active layer and managed layer (e.g., added/removed tabs, fields, filters)
 
 ## Power Pages Support
 
