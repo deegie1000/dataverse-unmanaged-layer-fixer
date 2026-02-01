@@ -581,11 +581,37 @@ public class ComponentService
             return new List<Entity>();
 
         var activeSolutionId = activeSolution.GetAttributeValue<Guid>("solutionid");
-        var componentIds = powerPagesComponents
+
+        // Get the component IDs from the managed solution
+        var managedComponentIds = powerPagesComponents
             .Select(c => c.GetAttributeValue<Guid>("objectid"))
             .Where(id => id != Guid.Empty)
             .ToHashSet();
 
+        // Get Power Pages components that are in the Active Solution (have unmanaged customizations)
+        var activeQuery = new QueryExpression("solutioncomponent")
+        {
+            ColumnSet = new ColumnSet("objectid", "componenttype"),
+            Criteria = new FilterExpression
+            {
+                Conditions =
+                {
+                    new ConditionExpression("solutionid", ConditionOperator.Equal, activeSolutionId),
+                    new ConditionExpression("objectid", ConditionOperator.In, managedComponentIds.Cast<object>().ToArray())
+                }
+            }
+        };
+
+        var activeComponents = await _dataverseService.RetrieveMultipleAsync(activeQuery);
+        var activeComponentIds = activeComponents.Entities
+            .Select(c => c.GetAttributeValue<Guid>("objectid"))
+            .Where(id => id != Guid.Empty)
+            .ToHashSet();
+
+        if (activeComponentIds.Count == 0)
+            return new List<Entity>();
+
+        // Fetch full details for Power Pages components that have unmanaged customizations
         var query = new QueryExpression("powerpagecomponent")
         {
             ColumnSet = new ColumnSet("powerpagecomponentid", "name", "powerpagecomponenttype", "modifiedon", "modifiedby", "content"),
@@ -593,7 +619,7 @@ public class ComponentService
             {
                 Conditions =
                 {
-                    new ConditionExpression("powerpagecomponentid", ConditionOperator.In, componentIds.Cast<object>().ToArray())
+                    new ConditionExpression("powerpagecomponentid", ConditionOperator.In, activeComponentIds.Cast<object>().ToArray())
                 }
             }
         };
