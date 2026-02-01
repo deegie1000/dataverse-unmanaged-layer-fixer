@@ -193,163 +193,288 @@ public class ComponentService
     {
         var results = new List<(Entity Component, Entity Layer, string LogicalName)>();
 
-        // Step 1: Find the Active Solution
-        Console.Write("\r  Finding Active Solution...                              ");
-        var activeSolution = await GetActiveSolutionAsync();
-        if (activeSolution == null)
+        // Step 1: Get all Active layers from msdyn_componentlayer table
+        // This is the source of truth for unmanaged customizations
+        Console.Write("\r  Querying Active layers from msdyn_componentlayer...     ");
+        var activeLayers = await GetActiveLayersAsync();
+        Console.WriteLine($"\r  Found {activeLayers.Count} components with Active layers.              ");
+
+        // Step 2: Build a lookup of component IDs from our managed solution
+        var solutionComponentIds = new Dictionary<Guid, (Entity Component, int ComponentType)>();
+        foreach (var component in components)
         {
-            Console.WriteLine("\r  Active Solution not found.                              ");
-            return results;
+            var componentType = component.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
+            var objectId = component.GetAttributeValue<Guid>("objectid");
+            if (objectId != Guid.Empty && componentType != 1) // Skip entities - check their subcomponents
+            {
+                solutionComponentIds[objectId] = (component, componentType);
+            }
         }
-
-        var activeSolutionId = activeSolution.GetAttributeValue<Guid>("solutionid");
-        Console.WriteLine($"\r  Active Solution ID: {activeSolutionId}                   ");
-
-        // Step 2: Get all components in the Active Solution (these are unmanaged customizations)
-        var activeComponents = await GetActiveSolutionComponentsAsync(activeSolutionId);
-        Console.WriteLine($"\r  Found {activeComponents.Count} components in Active Solution.          ");
 
         // Step 3: Get managed entity names for subcomponent lookup
         var managedEntityNames = GetManagedEntityNames(components, entityMetadataMap);
         Console.WriteLine($"  Found {managedEntityNames.Count} entities in managed solution.");
 
-        // Step 4: Find matching components
-        var matchingComponents = new List<(Entity Component, int ComponentType, Guid ObjectId, string LogicalName)>();
+        // Step 4: Find matching components - those that have Active layers
+        Console.Write("\r  Matching solution components with Active layers...      ");
 
-        // Check explicit non-entity components that are in the Active Solution
-        foreach (var component in components)
+        // Build lookup from activeLayers
+        var activeLayerLookup = new Dictionary<Guid, Entity>();
+        foreach (var layer in activeLayers)
         {
-            var componentType = component.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
-            var objectId = component.GetAttributeValue<Guid>("objectid");
+            var componentIdStr = layer.GetAttributeValue<string>("msdyn_componentid") ?? "";
+            if (Guid.TryParse(componentIdStr, out var compId))
+            {
+                activeLayerLookup[compId] = layer;
+            }
+        }
 
-            if (componentType == 1) continue; // Skip entities - check their subcomponents instead
-            if (objectId == Guid.Empty) continue;
-
-            // Check if this component is in the Active Solution
-            if (activeComponents.Contains((objectId, componentType)))
+        // Check explicit components from our solution and group by type for name resolution
+        var explicitMatches = new List<(Entity Component, Entity Layer, int ComponentType, Guid ObjectId, string LogicalName)>();
+        foreach (var (objectId, (component, componentType)) in solutionComponentIds)
+        {
+            if (activeLayerLookup.TryGetValue(objectId, out var layer))
             {
                 var logicalName = ComponentTypeHelper.GetSolutionComponentLogicalName(componentType) ?? "unknown";
-                matchingComponents.Add((component, componentType, objectId, logicalName));
+                explicitMatches.Add((component, layer, componentType, objectId, logicalName));
             }
         }
 
-        // Find subcomponents (forms, views, attributes) in Active Solution that belong to managed entities
+        // Step 5: Fetch proper display names for explicit components
+        if (explicitMatches.Count > 0)
+        {
+            Console.Write("\r  Fetching component display names...                     ");
+            await EnrichComponentNamesAsync(explicitMatches);
+        }
+
+        foreach (var (component, layer, componentType, objectId, logicalName) in explicitMatches)
+        {
+            results.Add((component, layer, logicalName));
+        }
+
+        // Step 6: Find entity subcomponents with Active layers
         if (managedEntityNames.Count > 0)
         {
-            var entitySubcomponents = await GetActiveSubcomponentsForEntitiesAsync(managedEntityNames, activeComponents);
-            matchingComponents.AddRange(entitySubcomponents);
+            var subcomponentResults = await GetEntitySubcomponentsWithActiveLayersAsync(
+                managedEntityNames, activeLayerLookup);
+            results.AddRange(subcomponentResults);
         }
 
-        Console.WriteLine($"  Found {matchingComponents.Count} components with unmanaged customizations.");
-
-        // Step 5: Fetch display names and create layer entities
-        if (matchingComponents.Count > 0)
-        {
-            Console.Write("\r  Fetching component details...                           ");
-
-            foreach (var (component, componentType, objectId, logicalName) in matchingComponents)
-            {
-                var componentName = component.GetAttributeValue<string>("_componentname") ??
-                    $"{ComponentTypeHelper.GetComponentTypeName(componentType)} - {objectId}";
-                var entityName = component.GetAttributeValue<string>("_entityname") ?? "";
-
-                // Create a pseudo-layer entity for display
-                var activeLayer = new Entity("msdyn_componentlayer");
-                activeLayer["msdyn_solutionname"] = "Active";
-                activeLayer["msdyn_componentid"] = objectId.ToString();
-                activeLayer["msdyn_name"] = componentName;
-
-                results.Add((component, activeLayer, logicalName));
-            }
-            Console.WriteLine($"\r  Component details fetched.                              ");
-        }
+        Console.WriteLine($"\r  Found {results.Count} components with unmanaged layers.                ");
 
         return results;
     }
 
-    private async Task<HashSet<(Guid ObjectId, int ComponentType)>> GetActiveSolutionComponentsAsync(Guid activeSolutionId)
+    private async Task EnrichComponentNamesAsync(
+        List<(Entity Component, Entity Layer, int ComponentType, Guid ObjectId, string LogicalName)> matches)
     {
-        var activeComponents = new HashSet<(Guid ObjectId, int ComponentType)>();
+        // Group by component type for efficient batched lookups
+        var byType = matches.GroupBy(m => m.ComponentType);
 
-        var query = new QueryExpression("solutioncomponent")
+        foreach (var group in byType)
         {
-            ColumnSet = new ColumnSet("objectid", "componenttype"),
+            var componentType = group.Key;
+            var items = group.ToList();
+            var objectIds = items.Select(i => i.ObjectId).ToList();
+
+            var nameMap = await FetchNamesForComponentTypeAsync(componentType, objectIds);
+
+            foreach (var (component, layer, _, objectId, _) in items)
+            {
+                if (nameMap.TryGetValue(objectId, out var name))
+                {
+                    layer["msdyn_name"] = name;
+                }
+                else
+                {
+                    // Use the msdyn_name from layer, or generate a descriptive fallback
+                    var existingName = layer.GetAttributeValue<string>("msdyn_name");
+                    if (string.IsNullOrEmpty(existingName) || Guid.TryParse(existingName, out _))
+                    {
+                        layer["msdyn_name"] = $"{ComponentTypeHelper.GetComponentTypeName(componentType)}: {objectId}";
+                    }
+                }
+            }
+        }
+    }
+
+    private async Task<Dictionary<Guid, string>> FetchNamesForComponentTypeAsync(int componentType, List<Guid> objectIds)
+    {
+        var names = new Dictionary<Guid, string>();
+        if (objectIds.Count == 0) return names;
+
+        try
+        {
+            switch (componentType)
+            {
+                case 61: // Web Resource
+                    await FetchNamesFromTableAsync("webresource", "webresourceid", "name", objectIds, names, "Web Resource");
+                    break;
+                case 20: // Security Role
+                    await FetchNamesFromTableAsync("role", "roleid", "name", objectIds, names, "Role");
+                    break;
+                case 29: // Workflow
+                    await FetchNamesFromTableAsync("workflow", "workflowid", "name", objectIds, names, "Workflow");
+                    break;
+                case 380: // Environment Variable Definition
+                    await FetchNamesFromTableAsync("environmentvariabledefinition", "environmentvariabledefinitionid", "displayname", objectIds, names, "Environment Variable Definition");
+                    break;
+                case 381: // Environment Variable Value
+                    await FetchEnvVarValueNamesAsync(objectIds, names);
+                    break;
+                case 80: // Model-driven App
+                    await FetchNamesFromTableAsync("appmodule", "appmoduleid", "name", objectIds, names, "App");
+                    break;
+                case 300: // Canvas App
+                    await FetchNamesFromTableAsync("canvasapp", "canvasappid", "name", objectIds, names, "Canvas App");
+                    break;
+                case 91: // Plugin Assembly
+                    await FetchNamesFromTableAsync("pluginassembly", "pluginassemblyid", "name", objectIds, names, "Plugin Assembly");
+                    break;
+                case 92: // SDK Message Processing Step
+                    await FetchNamesFromTableAsync("sdkmessageprocessingstep", "sdkmessageprocessingstepid", "name", objectIds, names, "Plugin Step");
+                    break;
+                case 62: // Site Map
+                    await FetchNamesFromTableAsync("sitemap", "sitemapid", "sitemapname", objectIds, names, "Site Map");
+                    break;
+                case 63: // Connection Role
+                    await FetchNamesFromTableAsync("connectionrole", "connectionroleid", "name", objectIds, names, "Connection Role");
+                    break;
+                case 9: // Option Set
+                    await FetchOptionSetNamesForEnrichAsync(objectIds, names);
+                    break;
+                default:
+                    // For unknown types, return empty - we'll use fallback
+                    break;
+            }
+        }
+        catch { /* Silently fail - names will use fallback */ }
+
+        return names;
+    }
+
+    private async Task FetchNamesFromTableAsync(string tableName, string idColumn, string nameColumn,
+        List<Guid> objectIds, Dictionary<Guid, string> names, string typePrefix)
+    {
+        var query = new QueryExpression(tableName)
+        {
+            ColumnSet = new ColumnSet(idColumn, nameColumn),
             Criteria = new FilterExpression
             {
-                Conditions = { new ConditionExpression("solutionid", ConditionOperator.Equal, activeSolutionId) }
+                Conditions = { new ConditionExpression(idColumn, ConditionOperator.In, objectIds.Cast<object>().ToArray()) }
+            }
+        };
+
+        var result = await _dataverseService.RetrieveMultipleAsync(query);
+        foreach (var entity in result.Entities)
+        {
+            var id = entity.GetAttributeValue<Guid>(idColumn);
+            var name = entity.GetAttributeValue<string>(nameColumn) ?? id.ToString();
+            names[id] = $"{typePrefix}: {name}";
+        }
+    }
+
+    private async Task FetchEnvVarValueNamesAsync(List<Guid> objectIds, Dictionary<Guid, string> names)
+    {
+        // Environment variable values don't have a name, so look up the parent definition
+        var query = new QueryExpression("environmentvariablevalue")
+        {
+            ColumnSet = new ColumnSet("environmentvariablevalueid", "environmentvariabledefinitionid"),
+            Criteria = new FilterExpression
+            {
+                Conditions = { new ConditionExpression("environmentvariablevalueid", ConditionOperator.In, objectIds.Cast<object>().ToArray()) }
+            }
+        };
+        query.LinkEntities.Add(new LinkEntity
+        {
+            LinkFromEntityName = "environmentvariablevalue",
+            LinkFromAttributeName = "environmentvariabledefinitionid",
+            LinkToEntityName = "environmentvariabledefinition",
+            LinkToAttributeName = "environmentvariabledefinitionid",
+            JoinOperator = JoinOperator.LeftOuter,
+            Columns = new ColumnSet("displayname"),
+            EntityAlias = "def"
+        });
+
+        var result = await _dataverseService.RetrieveMultipleAsync(query);
+        foreach (var entity in result.Entities)
+        {
+            var id = entity.GetAttributeValue<Guid>("environmentvariablevalueid");
+            var defName = entity.GetAttributeValue<AliasedValue>("def.displayname")?.Value as string ?? id.ToString();
+            names[id] = $"Environment Variable Value: {defName}";
+        }
+    }
+
+    private async Task FetchOptionSetNamesForEnrichAsync(List<Guid> objectIds, Dictionary<Guid, string> names)
+    {
+        var request = new RetrieveAllOptionSetsRequest();
+        var response = (RetrieveAllOptionSetsResponse)await _dataverseService.ExecuteAsync(request);
+
+        var idSet = objectIds.ToHashSet();
+        foreach (var optionSet in response.OptionSetMetadata)
+        {
+            if (optionSet.MetadataId.HasValue && idSet.Contains(optionSet.MetadataId.Value))
+            {
+                var displayName = optionSet.DisplayName?.UserLocalizedLabel?.Label ?? optionSet.Name;
+                names[optionSet.MetadataId.Value] = $"Option Set: {displayName}";
+            }
+        }
+    }
+
+    private async Task<List<Entity>> GetActiveLayersAsync()
+    {
+        var query = new QueryExpression("msdyn_componentlayer")
+        {
+            ColumnSet = new ColumnSet("msdyn_componentid", "msdyn_name", "msdyn_solutionname",
+                "msdyn_solutioncomponentname", "msdyn_order", "msdyn_overwritetime", "msdyn_publishername"),
+            Criteria = new FilterExpression
+            {
+                Conditions =
+                {
+                    new ConditionExpression("msdyn_solutionname", ConditionOperator.Equal, "Active")
+                }
             },
             PageInfo = new PagingInfo { Count = 5000, PageNumber = 1 }
         };
 
-        var components = await _dataverseService.RetrieveAllAsync(query, (page, _) =>
+        return await _dataverseService.RetrieveAllAsync(query, (page, count) =>
         {
-            Console.Write($"\r  Fetching Active Solution components... (page {page})    ");
+            Console.Write($"\r  Fetching Active layers... (page {page}, {count} found)    ");
         });
-
-        foreach (var comp in components)
-        {
-            var objId = comp.GetAttributeValue<Guid>("objectid");
-            var compType = comp.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
-            if (objId != Guid.Empty)
-            {
-                activeComponents.Add((objId, compType));
-            }
-        }
-
-        return activeComponents;
     }
 
-    private async Task<List<(Entity Component, int ComponentType, Guid ObjectId, string LogicalName)>> GetActiveSubcomponentsForEntitiesAsync(
-        HashSet<string> entityNames, HashSet<(Guid ObjectId, int ComponentType)> activeComponents)
+    private async Task<List<(Entity Component, Entity Layer, string LogicalName)>> GetEntitySubcomponentsWithActiveLayersAsync(
+        HashSet<string> entityNames, Dictionary<Guid, Entity> activeLayerLookup)
     {
-        var results = new List<(Entity Component, int ComponentType, Guid ObjectId, string LogicalName)>();
+        var results = new List<(Entity Component, Entity Layer, string LogicalName)>();
 
-        // Check forms (type 60) - query ALL forms for managed entities, then check if in Active Solution
-        Console.Write("\r  Checking forms...                                        ");
-        var forms = await GetEntitySubcomponentsInActiveAsync("systemform", "formid", "objecttypecode", "name", entityNames, activeComponents, 60);
-        foreach (var (id, name, entityName) in forms)
-        {
-            var comp = CreateSubcomponentEntity(id, 60, name, entityName);
-            results.Add((comp, 60, id, "systemform"));
-        }
+        // Check forms (type 60)
+        Console.Write("\r  Checking forms with Active layers...                    ");
+        await CheckEntitySubcomponentsForActiveLayers("systemform", "formid", "objecttypecode", "name",
+            entityNames, activeLayerLookup, 60, results);
 
         // Check views (type 26)
-        Console.Write("\r  Checking views...                                        ");
-        var views = await GetEntitySubcomponentsInActiveAsync("savedquery", "savedqueryid", "returnedtypecode", "name", entityNames, activeComponents, 26);
-        foreach (var (id, name, entityName) in views)
-        {
-            var comp = CreateSubcomponentEntity(id, 26, name, entityName);
-            results.Add((comp, 26, id, "savedquery"));
-        }
+        Console.Write("\r  Checking views with Active layers...                    ");
+        await CheckEntitySubcomponentsForActiveLayers("savedquery", "savedqueryid", "returnedtypecode", "name",
+            entityNames, activeLayerLookup, 26, results);
 
         // Check charts (type 59)
-        Console.Write("\r  Checking charts...                                       ");
-        var charts = await GetEntitySubcomponentsInActiveAsync("savedqueryvisualization", "savedqueryvisualizationid", "primaryentitytypecode", "name", entityNames, activeComponents, 59);
-        foreach (var (id, name, entityName) in charts)
-        {
-            var comp = CreateSubcomponentEntity(id, 59, name, entityName);
-            results.Add((comp, 59, id, "savedqueryvisualization"));
-        }
+        Console.Write("\r  Checking charts with Active layers...                   ");
+        await CheckEntitySubcomponentsForActiveLayers("savedqueryvisualization", "savedqueryvisualizationid",
+            "primaryentitytypecode", "name", entityNames, activeLayerLookup, 59, results);
 
         // Check attributes (type 2)
-        Console.Write("\r  Checking attributes...                                   ");
-        var attributes = await GetEntityAttributesInActiveAsync(entityNames, activeComponents);
-        foreach (var (id, entityName, attrName) in attributes)
-        {
-            var comp = CreateSubcomponentEntity(id, 2, $"{entityName}.{attrName}", entityName);
-            results.Add((comp, 2, id, "attribute"));
-        }
+        Console.Write("\r  Checking attributes with Active layers...               ");
+        await CheckAttributesForActiveLayers(entityNames, activeLayerLookup, results);
 
-        Console.WriteLine($"\r  Found {results.Count} entity subcomponents with customizations.          ");
         return results;
     }
 
-    private async Task<List<(Guid Id, string Name, string EntityName)>> GetEntitySubcomponentsInActiveAsync(
+    private async Task CheckEntitySubcomponentsForActiveLayers(
         string tableName, string idColumn, string entityColumn, string nameColumn,
-        HashSet<string> entityNames, HashSet<(Guid ObjectId, int ComponentType)> activeComponents, int componentType)
+        HashSet<string> entityNames, Dictionary<Guid, Entity> activeLayerLookup,
+        int componentType, List<(Entity Component, Entity Layer, string LogicalName)> results)
     {
-        var results = new List<(Guid Id, string Name, string EntityName)>();
-
         var query = new QueryExpression(tableName)
         {
             ColumnSet = new ColumnSet(idColumn, nameColumn, entityColumn),
@@ -370,23 +495,23 @@ public class ComponentService
                 var name = entity.GetAttributeValue<string>(nameColumn) ?? "Unknown";
                 var entityName = entity.GetAttributeValue<string>(entityColumn) ?? "Unknown";
 
-                // Check if this subcomponent is in the Active Solution (has unmanaged customization)
-                if (activeComponents.Contains((id, componentType)))
+                // Only include if it has an Active layer
+                if (activeLayerLookup.TryGetValue(id, out var layer))
                 {
-                    results.Add((id, $"{entityName}.{name}", entityName));
+                    var comp = CreateSubcomponentEntity(id, componentType, $"{entityName}.{name}", entityName);
+                    // Update layer with proper name
+                    layer["msdyn_name"] = $"{entityName}.{name}";
+                    results.Add((comp, layer, tableName));
                 }
             }
         }
         catch { /* Silently fail */ }
-
-        return results;
     }
 
-    private async Task<List<(Guid MetadataId, string EntityName, string AttributeName)>> GetEntityAttributesInActiveAsync(
-        HashSet<string> entityNames, HashSet<(Guid ObjectId, int ComponentType)> activeComponents)
+    private async Task CheckAttributesForActiveLayers(
+        HashSet<string> entityNames, Dictionary<Guid, Entity> activeLayerLookup,
+        List<(Entity Component, Entity Layer, string LogicalName)> results)
     {
-        var results = new List<(Guid MetadataId, string EntityName, string AttributeName)>();
-
         try
         {
             var request = new RetrieveAllEntitiesRequest
@@ -405,17 +530,17 @@ public class ComponentService
                 foreach (var attr in entityMetadata.Attributes)
                 {
                     var attrId = attr.MetadataId ?? Guid.Empty;
-                    // Check if this attribute is in the Active Solution (has unmanaged customization)
-                    if (attrId != Guid.Empty && activeComponents.Contains((attrId, 2)))
+                    if (attrId != Guid.Empty && activeLayerLookup.TryGetValue(attrId, out var layer))
                     {
-                        results.Add((attrId, entityMetadata.LogicalName, attr.LogicalName));
+                        var name = $"{entityMetadata.LogicalName}.{attr.LogicalName}";
+                        var comp = CreateSubcomponentEntity(attrId, 2, name, entityMetadata.LogicalName);
+                        layer["msdyn_name"] = name;
+                        results.Add((comp, layer, "attribute"));
                     }
                 }
             }
         }
         catch { /* Silently fail */ }
-
-        return results;
     }
 
     private async Task<Entity?> GetActiveSolutionAsync()
@@ -462,159 +587,6 @@ public class ComponentService
         comp["_componentname"] = name;
         comp["_entityname"] = entityName;
         return comp;
-    }
-
-    private async Task<Dictionary<Guid, string>> GetComponentDisplayNamesAsync(
-        List<(Entity Component, int ComponentType, Guid ObjectId, string LogicalName)> components,
-        Dictionary<Guid, string> entityMetadataMap)
-    {
-        var names = new Dictionary<Guid, string>();
-        var groupedByType = components.GroupBy(c => c.ComponentType);
-
-        foreach (var group in groupedByType)
-        {
-            var componentType = group.Key;
-            var objectIds = group.Select(c => c.ObjectId).ToList();
-
-            try
-            {
-                switch (componentType)
-                {
-                    case 60: // System Form
-                        await FetchComponentNamesAsync("systemform", "formid", "name", objectIds, names, "Form");
-                        break;
-                    case 26: // Saved Query
-                        await FetchComponentNamesAsync("savedquery", "savedqueryid", "name", objectIds, names, "View");
-                        break;
-                    case 59: // Chart
-                        await FetchComponentNamesAsync("savedqueryvisualization", "savedqueryvisualizationid", "name", objectIds, names, "Chart");
-                        break;
-                    case 61: // Web Resource
-                        await FetchComponentNamesAsync("webresource", "webresourceid", "name", objectIds, names, "Web Resource");
-                        break;
-                    case 29: // Workflow
-                        await FetchComponentNamesAsync("workflow", "workflowid", "name", objectIds, names, "Workflow");
-                        break;
-                    case 20: // Security Role
-                        await FetchComponentNamesAsync("role", "roleid", "name", objectIds, names, "Role");
-                        break;
-                    case 380: // Environment Variable Definition
-                        await FetchComponentNamesAsync("environmentvariabledefinition", "environmentvariabledefinitionid", "displayname", objectIds, names, "Env Variable");
-                        break;
-                    case 381: // Environment Variable Value
-                        await FetchComponentNamesAsync("environmentvariablevalue", "environmentvariablevalueid", "schemaname", objectIds, names, "Env Variable Value");
-                        break;
-                    case 80: // Model-driven App
-                        await FetchComponentNamesAsync("appmodule", "appmoduleid", "name", objectIds, names, "App");
-                        break;
-                    case 300: // Canvas App
-                        await FetchComponentNamesAsync("canvasapp", "canvasappid", "name", objectIds, names, "Canvas App");
-                        break;
-                    case 91: // Plugin Assembly
-                        await FetchComponentNamesAsync("pluginassembly", "pluginassemblyid", "name", objectIds, names, "Plugin Assembly");
-                        break;
-                    case 92: // SDK Message Processing Step
-                        await FetchComponentNamesAsync("sdkmessageprocessingstep", "sdkmessageprocessingstepid", "name", objectIds, names, "Plugin Step");
-                        break;
-                    case 62: // Site Map
-                        await FetchComponentNamesAsync("sitemap", "sitemapid", "sitemapname", objectIds, names, "Site Map");
-                        break;
-                    case 63: // Connection Role
-                        await FetchComponentNamesAsync("connectionrole", "connectionroleid", "name", objectIds, names, "Connection Role");
-                        break;
-                    case 9: // Option Set
-                        await FetchOptionSetNamesAsync(objectIds, names);
-                        break;
-                    case 2: // Attribute
-                        foreach (var (comp, _, objId, _) in group)
-                        {
-                            var attrName = comp.GetAttributeValue<string>("_componentname");
-                            names[objId] = $"Attribute: {attrName ?? objId.ToString()}";
-                        }
-                        break;
-                    default:
-                        foreach (var id in objectIds)
-                        {
-                            names[id] = $"{ComponentTypeHelper.GetComponentTypeName(componentType)}: {id}";
-                        }
-                        break;
-                }
-            }
-            catch
-            {
-                foreach (var id in objectIds)
-                {
-                    if (!names.ContainsKey(id))
-                        names[id] = $"{ComponentTypeHelper.GetComponentTypeName(componentType)}: {id}";
-                }
-            }
-        }
-
-        return names;
-    }
-
-    private async Task FetchComponentNamesAsync(string tableName, string idColumn, string nameColumn,
-        List<Guid> objectIds, Dictionary<Guid, string> names, string typePrefix)
-    {
-        if (objectIds.Count == 0) return;
-
-        var query = new QueryExpression(tableName)
-        {
-            ColumnSet = new ColumnSet(idColumn, nameColumn),
-            Criteria = new FilterExpression
-            {
-                Conditions =
-                {
-                    new ConditionExpression(idColumn, ConditionOperator.In, objectIds.Cast<object>().ToArray())
-                }
-            }
-        };
-
-        try
-        {
-            var result = await _dataverseService.RetrieveMultipleAsync(query);
-            foreach (var entity in result.Entities)
-            {
-                var id = entity.GetAttributeValue<Guid>(idColumn);
-                var name = entity.GetAttributeValue<string>(nameColumn) ?? id.ToString();
-                names[id] = $"{typePrefix}: {name}";
-            }
-        }
-        catch { /* Silently fail */ }
-
-        foreach (var id in objectIds)
-        {
-            if (!names.ContainsKey(id))
-                names[id] = $"{typePrefix}: {id}";
-        }
-    }
-
-    private async Task FetchOptionSetNamesAsync(List<Guid> objectIds, Dictionary<Guid, string> names)
-    {
-        if (objectIds.Count == 0) return;
-
-        try
-        {
-            var request = new RetrieveAllOptionSetsRequest();
-            var response = (RetrieveAllOptionSetsResponse)await _dataverseService.ExecuteAsync(request);
-
-            var idSet = objectIds.ToHashSet();
-            foreach (var optionSet in response.OptionSetMetadata)
-            {
-                if (optionSet.MetadataId.HasValue && idSet.Contains(optionSet.MetadataId.Value))
-                {
-                    var displayName = optionSet.DisplayName?.UserLocalizedLabel?.Label ?? optionSet.Name;
-                    names[optionSet.MetadataId.Value] = $"Option Set: {displayName}";
-                }
-            }
-        }
-        catch { /* Silently fail */ }
-
-        foreach (var id in objectIds)
-        {
-            if (!names.ContainsKey(id))
-                names[id] = $"Option Set: {id}";
-        }
     }
 
     private async Task<List<Entity>> GetUnmanagedPowerPagesComponentsAsync(List<Entity> powerPagesComponents)
