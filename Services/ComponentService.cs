@@ -193,54 +193,51 @@ public class ComponentService
     {
         var results = new List<(Entity Component, Entity Layer, string LogicalName)>();
 
-        // Step 1: Get all Active layers from msdyn_componentlayer table
-        // This is the source of truth for unmanaged customizations
-        Console.Write("\r  Querying Active layers from msdyn_componentlayer...     ");
-        var activeLayers = await GetActiveLayersAsync();
-        Console.WriteLine($"\r  Found {activeLayers.Count} components with Active layers.              ");
-
-        // Step 2: Build a lookup of component IDs from our managed solution
-        var solutionComponentIds = new Dictionary<Guid, (Entity Component, int ComponentType)>();
+        // Step 1: Build a list of components to check (excluding entities - we check their subcomponents)
+        var componentsToCheck = new List<(Entity Component, int ComponentType, Guid ObjectId, string SolutionComponentName)>();
         foreach (var component in components)
         {
             var componentType = component.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
             var objectId = component.GetAttributeValue<Guid>("objectid");
             if (objectId != Guid.Empty && componentType != 1) // Skip entities - check their subcomponents
             {
-                solutionComponentIds[objectId] = (component, componentType);
+                var solutionComponentName = ComponentTypeHelper.GetSolutionComponentName(componentType);
+                if (!string.IsNullOrEmpty(solutionComponentName))
+                {
+                    componentsToCheck.Add((component, componentType, objectId, solutionComponentName));
+                }
             }
         }
 
-        // Step 3: Get managed entity names for subcomponent lookup
-        var managedEntityNames = GetManagedEntityNames(components, entityMetadataMap);
-        Console.WriteLine($"  Found {managedEntityNames.Count} entities in managed solution.");
+        Console.WriteLine($"  Checking {componentsToCheck.Count} components for Active layers...");
 
-        // Step 4: Find matching components - those that have Active layers
-        Console.Write("\r  Matching solution components with Active layers...      ");
-
-        // Build lookup from activeLayers
-        var activeLayerLookup = new Dictionary<Guid, Entity>();
-        foreach (var layer in activeLayers)
-        {
-            var componentIdStr = layer.GetAttributeValue<string>("msdyn_componentid") ?? "";
-            if (Guid.TryParse(componentIdStr, out var compId))
-            {
-                activeLayerLookup[compId] = layer;
-            }
-        }
-
-        // Check explicit components from our solution and group by type for name resolution
+        // Step 2: Check each component for Active layers by querying msdyn_componentlayer
+        // Group by solution component name for batched queries
+        var byType = componentsToCheck.GroupBy(c => c.SolutionComponentName);
         var explicitMatches = new List<(Entity Component, Entity Layer, int ComponentType, Guid ObjectId, string LogicalName)>();
-        foreach (var (objectId, (component, componentType)) in solutionComponentIds)
+
+        foreach (var group in byType)
         {
-            if (activeLayerLookup.TryGetValue(objectId, out var layer))
+            var solutionComponentName = group.Key;
+            var items = group.ToList();
+            var objectIds = items.Select(i => i.ObjectId).ToList();
+
+            Console.Write($"\r  Checking {solutionComponentName} ({items.Count})...                    ");
+
+            // Query layers for these components
+            var activeLayers = await GetActiveLayersForComponentsAsync(objectIds, solutionComponentName);
+
+            foreach (var item in items)
             {
-                var logicalName = ComponentTypeHelper.GetSolutionComponentLogicalName(componentType) ?? "unknown";
-                explicitMatches.Add((component, layer, componentType, objectId, logicalName));
+                if (activeLayers.TryGetValue(item.ObjectId, out var layer))
+                {
+                    var logicalName = ComponentTypeHelper.GetSolutionComponentLogicalName(item.ComponentType) ?? "unknown";
+                    explicitMatches.Add((item.Component, layer, item.ComponentType, item.ObjectId, logicalName));
+                }
             }
         }
 
-        // Step 5: Fetch proper display names for explicit components
+        // Step 3: Fetch proper display names for explicit components
         if (explicitMatches.Count > 0)
         {
             Console.Write("\r  Fetching component display names...                     ");
@@ -252,17 +249,72 @@ public class ComponentService
             results.Add((component, layer, logicalName));
         }
 
-        // Step 6: Find entity subcomponents with Active layers
+        // Step 4: Get managed entity names for subcomponent lookup
+        var managedEntityNames = GetManagedEntityNames(components, entityMetadataMap);
+        Console.WriteLine($"\r  Found {managedEntityNames.Count} entities in managed solution.              ");
+
+        // Step 5: Find entity subcomponents with Active layers
         if (managedEntityNames.Count > 0)
         {
-            var subcomponentResults = await GetEntitySubcomponentsWithActiveLayersAsync(
-                managedEntityNames, activeLayerLookup);
+            var subcomponentResults = await GetEntitySubcomponentsWithActiveLayersAsync(managedEntityNames);
             results.AddRange(subcomponentResults);
         }
 
-        Console.WriteLine($"\r  Found {results.Count} components with unmanaged layers.                ");
+        Console.WriteLine($"  Found {results.Count} components with unmanaged layers.");
 
         return results;
+    }
+
+    private async Task<Dictionary<Guid, Entity>> GetActiveLayersForComponentsAsync(
+        List<Guid> objectIds, string solutionComponentName)
+    {
+        var activeLayers = new Dictionary<Guid, Entity>();
+        if (objectIds.Count == 0) return activeLayers;
+
+        // Query msdyn_componentlayer for these specific components
+        // The virtual entity works best when filtered by componentid and solutioncomponentname
+        try
+        {
+            // Convert GUIDs to strings for the query (msdyn_componentid is a string field)
+            var componentIdStrings = objectIds.Select(id => id.ToString()).ToArray();
+
+            var query = new QueryExpression("msdyn_componentlayer")
+            {
+                ColumnSet = new ColumnSet("msdyn_componentid", "msdyn_name", "msdyn_solutionname",
+                    "msdyn_solutioncomponentname", "msdyn_order", "msdyn_overwritetime", "msdyn_publishername"),
+                Criteria = new FilterExpression(LogicalOperator.And)
+                {
+                    Conditions =
+                    {
+                        new ConditionExpression("msdyn_solutioncomponentname", ConditionOperator.Equal, solutionComponentName),
+                        new ConditionExpression("msdyn_componentid", ConditionOperator.In, componentIdStrings)
+                    }
+                },
+                PageInfo = new PagingInfo { Count = 5000, PageNumber = 1 }
+            };
+
+            var layers = await _dataverseService.RetrieveAllAsync(query);
+
+            // Filter to only Active layers and build lookup
+            foreach (var layer in layers)
+            {
+                var solutionName = layer.GetAttributeValue<string>("msdyn_solutionname") ?? "";
+                if (solutionName == "Active")
+                {
+                    var componentIdStr = layer.GetAttributeValue<string>("msdyn_componentid") ?? "";
+                    if (Guid.TryParse(componentIdStr, out var compId) && !activeLayers.ContainsKey(compId))
+                    {
+                        activeLayers[compId] = layer;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"\r  Warning: Could not query layers for {solutionComponentName}: {ex.Message}");
+        }
+
+        return activeLayers;
     }
 
     private async Task EnrichComponentNamesAsync(
@@ -421,58 +473,36 @@ public class ComponentService
         }
     }
 
-    private async Task<List<Entity>> GetActiveLayersAsync()
-    {
-        var query = new QueryExpression("msdyn_componentlayer")
-        {
-            ColumnSet = new ColumnSet("msdyn_componentid", "msdyn_name", "msdyn_solutionname",
-                "msdyn_solutioncomponentname", "msdyn_order", "msdyn_overwritetime", "msdyn_publishername"),
-            Criteria = new FilterExpression
-            {
-                Conditions =
-                {
-                    new ConditionExpression("msdyn_solutionname", ConditionOperator.Equal, "Active")
-                }
-            },
-            PageInfo = new PagingInfo { Count = 5000, PageNumber = 1 }
-        };
-
-        return await _dataverseService.RetrieveAllAsync(query, (page, count) =>
-        {
-            Console.Write($"\r  Fetching Active layers... (page {page}, {count} found)    ");
-        });
-    }
-
     private async Task<List<(Entity Component, Entity Layer, string LogicalName)>> GetEntitySubcomponentsWithActiveLayersAsync(
-        HashSet<string> entityNames, Dictionary<Guid, Entity> activeLayerLookup)
+        HashSet<string> entityNames)
     {
         var results = new List<(Entity Component, Entity Layer, string LogicalName)>();
 
         // Check forms (type 60)
         Console.Write("\r  Checking forms with Active layers...                    ");
         await CheckEntitySubcomponentsForActiveLayers("systemform", "formid", "objecttypecode", "name",
-            entityNames, activeLayerLookup, 60, results);
+            entityNames, "System Form", 60, results);
 
         // Check views (type 26)
         Console.Write("\r  Checking views with Active layers...                    ");
         await CheckEntitySubcomponentsForActiveLayers("savedquery", "savedqueryid", "returnedtypecode", "name",
-            entityNames, activeLayerLookup, 26, results);
+            entityNames, "Saved Query", 26, results);
 
         // Check charts (type 59)
         Console.Write("\r  Checking charts with Active layers...                   ");
         await CheckEntitySubcomponentsForActiveLayers("savedqueryvisualization", "savedqueryvisualizationid",
-            "primaryentitytypecode", "name", entityNames, activeLayerLookup, 59, results);
+            "primaryentitytypecode", "name", entityNames, "System Chart", 59, results);
 
         // Check attributes (type 2)
         Console.Write("\r  Checking attributes with Active layers...               ");
-        await CheckAttributesForActiveLayers(entityNames, activeLayerLookup, results);
+        await CheckAttributesForActiveLayers(entityNames, results);
 
         return results;
     }
 
     private async Task CheckEntitySubcomponentsForActiveLayers(
         string tableName, string idColumn, string entityColumn, string nameColumn,
-        HashSet<string> entityNames, Dictionary<Guid, Entity> activeLayerLookup,
+        HashSet<string> entityNames, string solutionComponentName,
         int componentType, List<(Entity Component, Entity Layer, string LogicalName)> results)
     {
         var query = new QueryExpression(tableName)
@@ -489,6 +519,12 @@ public class ComponentService
         {
             var entities = await _dataverseService.RetrieveAllAsync(query);
 
+            if (entities.Count == 0) return;
+
+            // Get IDs and query for Active layers
+            var objectIds = entities.Select(e => e.GetAttributeValue<Guid>(idColumn)).Where(id => id != Guid.Empty).ToList();
+            var activeLayers = await GetActiveLayersForComponentsAsync(objectIds, solutionComponentName);
+
             foreach (var entity in entities)
             {
                 var id = entity.GetAttributeValue<Guid>(idColumn);
@@ -496,7 +532,7 @@ public class ComponentService
                 var entityName = entity.GetAttributeValue<string>(entityColumn) ?? "Unknown";
 
                 // Only include if it has an Active layer
-                if (activeLayerLookup.TryGetValue(id, out var layer))
+                if (activeLayers.TryGetValue(id, out var layer))
                 {
                     var comp = CreateSubcomponentEntity(id, componentType, $"{entityName}.{name}", entityName);
                     // Update layer with proper name
@@ -505,11 +541,14 @@ public class ComponentService
                 }
             }
         }
-        catch { /* Silently fail */ }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"\r  Warning: Error checking {tableName}: {ex.Message}");
+        }
     }
 
     private async Task CheckAttributesForActiveLayers(
-        HashSet<string> entityNames, Dictionary<Guid, Entity> activeLayerLookup,
+        HashSet<string> entityNames,
         List<(Entity Component, Entity Layer, string LogicalName)> results)
     {
         try
@@ -522,6 +561,9 @@ public class ComponentService
 
             var response = (RetrieveAllEntitiesResponse)await _dataverseService.ExecuteAsync(request);
 
+            // Collect all attribute IDs for entities we care about
+            var attributeInfo = new List<(Guid AttrId, string EntityName, string AttrName)>();
+
             foreach (var entityMetadata in response.EntityMetadata)
             {
                 if (!entityNames.Contains(entityMetadata.LogicalName))
@@ -530,17 +572,34 @@ public class ComponentService
                 foreach (var attr in entityMetadata.Attributes)
                 {
                     var attrId = attr.MetadataId ?? Guid.Empty;
-                    if (attrId != Guid.Empty && activeLayerLookup.TryGetValue(attrId, out var layer))
+                    if (attrId != Guid.Empty)
                     {
-                        var name = $"{entityMetadata.LogicalName}.{attr.LogicalName}";
-                        var comp = CreateSubcomponentEntity(attrId, 2, name, entityMetadata.LogicalName);
-                        layer["msdyn_name"] = name;
-                        results.Add((comp, layer, "attribute"));
+                        attributeInfo.Add((attrId, entityMetadata.LogicalName, attr.LogicalName));
                     }
                 }
             }
+
+            if (attributeInfo.Count == 0) return;
+
+            // Query for Active layers in batches
+            var objectIds = attributeInfo.Select(a => a.AttrId).ToList();
+            var activeLayers = await GetActiveLayersForComponentsAsync(objectIds, "Attribute");
+
+            foreach (var (attrId, entityName, attrName) in attributeInfo)
+            {
+                if (activeLayers.TryGetValue(attrId, out var layer))
+                {
+                    var name = $"{entityName}.{attrName}";
+                    var comp = CreateSubcomponentEntity(attrId, 2, name, entityName);
+                    layer["msdyn_name"] = name;
+                    results.Add((comp, layer, "attribute"));
+                }
+            }
         }
-        catch { /* Silently fail */ }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"\r  Warning: Error checking attributes: {ex.Message}");
+        }
     }
 
     private async Task<Entity?> GetActiveSolutionAsync()

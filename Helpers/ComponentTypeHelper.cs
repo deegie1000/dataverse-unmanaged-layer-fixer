@@ -202,6 +202,51 @@ public static class ComponentTypeHelper
     }
 
     /// <summary>
+    /// Gets the solution component name used in msdyn_solutioncomponentname field.
+    /// This is used when querying msdyn_componentlayer.
+    /// </summary>
+    public static string? GetSolutionComponentName(int componentType)
+    {
+        return componentType switch
+        {
+            1 => "Entity",
+            2 => "Attribute",
+            3 => "Relationship",
+            9 => "Option Set",
+            14 => "Entity Key",
+            16 => "Privilege",
+            20 => "Role",
+            26 => "Saved Query",
+            29 => "Workflow",
+            31 => "Report",
+            36 => "Email Template",
+            44 => "Duplicate Detection Rule",
+            59 => "System Chart",
+            60 => "System Form",
+            61 => "Web Resource",
+            62 => "Site Map",
+            63 => "Connection Role",
+            66 => "Custom Control",
+            70 => "Field Security Profile",
+            80 => "App",
+            90 => "Plug-in Type",
+            91 => "Plug-in Assembly",
+            92 => "SDK Message Processing Step",
+            93 => "SDK Message Processing Step Image",
+            95 => "Service Endpoint",
+            150 => "Routing Rule Set",
+            152 => "SLA",
+            154 => "Record Creation and Update Rule",
+            161 => "Mobile Offline Profile",
+            300 => "Canvas App",
+            371 => "Connector",
+            380 => "Environment Variable Definition",
+            381 => "Environment Variable Value",
+            _ => null
+        };
+    }
+
+    /// <summary>
     /// Gets the human-readable name for a Power Pages component type.
     /// </summary>
     public static string GetPowerPagesComponentTypeName(int componentType)
