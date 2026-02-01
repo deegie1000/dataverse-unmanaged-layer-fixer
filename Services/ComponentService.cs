@@ -645,51 +645,76 @@ public class ComponentService
         if (powerPagesComponents.Count == 0)
             return new List<Entity>();
 
-        // Get the component IDs from the managed solution
-        var managedComponentIds = powerPagesComponents
-            .Select(c => c.GetAttributeValue<Guid>("objectid"))
-            .Where(id => id != Guid.Empty)
-            .ToHashSet();
-
-        if (managedComponentIds.Count == 0)
+        var activeSolution = await GetActiveSolutionAsync();
+        if (activeSolution == null)
             return new List<Entity>();
 
-        // For Power Pages, we need to check the powerpagecomponent table directly
-        // Components with overridingsolutionid set indicate they have been customized
-        // We look for managed components (ismanaged = true) that have an overriding solution
-        var query = new QueryExpression("powerpagecomponent")
+        var activeSolutionId = activeSolution.GetAttributeValue<Guid>("solutionid");
+
+        // Build a map of (objectId, componentType) for the managed solution's Power Pages components
+        var managedComponents = new Dictionary<Guid, int>();
+        foreach (var comp in powerPagesComponents)
         {
-            ColumnSet = new ColumnSet("powerpagecomponentid", "name", "powerpagecomponenttype",
-                "modifiedon", "modifiedby", "content", "overridingsolutionid", "ismanaged"),
+            var objectId = comp.GetAttributeValue<Guid>("objectid");
+            var componentType = comp.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
+            if (objectId != Guid.Empty && componentType != 0)
+            {
+                managedComponents[objectId] = componentType;
+            }
+        }
+
+        if (managedComponents.Count == 0)
+            return new List<Entity>();
+
+        // Query Active Solution for components that match our managed Power Pages component IDs
+        var activeQuery = new QueryExpression("solutioncomponent")
+        {
+            ColumnSet = new ColumnSet("objectid", "componenttype"),
             Criteria = new FilterExpression
             {
                 Conditions =
                 {
-                    new ConditionExpression("powerpagecomponentid", ConditionOperator.In, managedComponentIds.Cast<object>().ToArray())
+                    new ConditionExpression("solutionid", ConditionOperator.Equal, activeSolutionId),
+                    new ConditionExpression("objectid", ConditionOperator.In, managedComponents.Keys.Cast<object>().ToArray())
                 }
             }
         };
 
-        var allComponents = await _dataverseService.RetrieveMultipleAsync(query);
+        var activeComponents = await _dataverseService.RetrieveMultipleAsync(activeQuery);
 
-        // Filter to only those that have an overriding solution (indicating unmanaged customization)
-        // OR are managed but exist in the Active Solution
-        var activeSolution = await GetActiveSolutionAsync();
-        var activeSolutionId = activeSolution?.GetAttributeValue<Guid>("solutionid") ?? Guid.Empty;
-
-        var unmanagedComponents = new List<Entity>();
-        foreach (var component in allComponents.Entities)
+        // Find components that are in BOTH managed solution AND Active Solution with matching component types
+        var matchingIds = new HashSet<Guid>();
+        foreach (var activeComp in activeComponents.Entities)
         {
-            var overridingSolutionRef = component.GetAttributeValue<EntityReference>("overridingsolutionid");
+            var objectId = activeComp.GetAttributeValue<Guid>("objectid");
+            var activeComponentType = activeComp.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
 
-            // If there's an overriding solution, this component has been customized
-            if (overridingSolutionRef != null)
+            // Must match both objectId AND component type
+            if (managedComponents.TryGetValue(objectId, out var managedComponentType) &&
+                managedComponentType == activeComponentType)
             {
-                unmanagedComponents.Add(component);
+                matchingIds.Add(objectId);
             }
         }
 
-        return unmanagedComponents;
+        if (matchingIds.Count == 0)
+            return new List<Entity>();
+
+        // Fetch full details for matching Power Pages components
+        var query = new QueryExpression("powerpagecomponent")
+        {
+            ColumnSet = new ColumnSet("powerpagecomponentid", "name", "powerpagecomponenttype", "modifiedon", "modifiedby"),
+            Criteria = new FilterExpression
+            {
+                Conditions =
+                {
+                    new ConditionExpression("powerpagecomponentid", ConditionOperator.In, matchingIds.Cast<object>().ToArray())
+                }
+            }
+        };
+
+        var result = await _dataverseService.RetrieveMultipleAsync(query);
+        return result.Entities.ToList();
     }
 
     private async Task<int> ProcessStandardComponentsAsync(
