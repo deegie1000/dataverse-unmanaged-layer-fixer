@@ -645,12 +645,6 @@ public class ComponentService
         if (powerPagesComponents.Count == 0)
             return new List<Entity>();
 
-        var activeSolution = await GetActiveSolutionAsync();
-        if (activeSolution == null)
-            return new List<Entity>();
-
-        var activeSolutionId = activeSolution.GetAttributeValue<Guid>("solutionid");
-
         // Get the component IDs from the managed solution
         var managedComponentIds = powerPagesComponents
             .Select(c => c.GetAttributeValue<Guid>("objectid"))
@@ -660,52 +654,42 @@ public class ComponentService
         if (managedComponentIds.Count == 0)
             return new List<Entity>();
 
-        // Get Power Pages component types from the managed solution for filtering
-        var managedComponentTypes = powerPagesComponents
-            .Select(c => c.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0)
-            .Where(t => t != 0)
-            .ToHashSet();
-
-        // Get Power Pages components that are in the Active Solution (have unmanaged customizations)
-        // Filter by BOTH objectid AND component type to avoid false positives
-        var activeQuery = new QueryExpression("solutioncomponent")
-        {
-            ColumnSet = new ColumnSet("objectid", "componenttype"),
-            Criteria = new FilterExpression
-            {
-                Conditions =
-                {
-                    new ConditionExpression("solutionid", ConditionOperator.Equal, activeSolutionId),
-                    new ConditionExpression("objectid", ConditionOperator.In, managedComponentIds.Cast<object>().ToArray()),
-                    new ConditionExpression("componenttype", ConditionOperator.In, managedComponentTypes.Cast<object>().ToArray())
-                }
-            }
-        };
-
-        var activeComponents = await _dataverseService.RetrieveMultipleAsync(activeQuery);
-        var activeComponentIds = activeComponents.Entities
-            .Select(c => c.GetAttributeValue<Guid>("objectid"))
-            .Where(id => id != Guid.Empty)
-            .ToHashSet();
-
-        if (activeComponentIds.Count == 0)
-            return new List<Entity>();
-
-        // Fetch full details for Power Pages components that have unmanaged customizations
+        // For Power Pages, we need to check the powerpagecomponent table directly
+        // Components with overridingsolutionid set indicate they have been customized
+        // We look for managed components (ismanaged = true) that have an overriding solution
         var query = new QueryExpression("powerpagecomponent")
         {
-            ColumnSet = new ColumnSet("powerpagecomponentid", "name", "powerpagecomponenttype", "modifiedon", "modifiedby", "content"),
+            ColumnSet = new ColumnSet("powerpagecomponentid", "name", "powerpagecomponenttype",
+                "modifiedon", "modifiedby", "content", "overridingsolutionid", "ismanaged"),
             Criteria = new FilterExpression
             {
                 Conditions =
                 {
-                    new ConditionExpression("powerpagecomponentid", ConditionOperator.In, activeComponentIds.Cast<object>().ToArray())
+                    new ConditionExpression("powerpagecomponentid", ConditionOperator.In, managedComponentIds.Cast<object>().ToArray())
                 }
             }
         };
 
-        var result = await _dataverseService.RetrieveMultipleAsync(query);
-        return result.Entities.ToList();
+        var allComponents = await _dataverseService.RetrieveMultipleAsync(query);
+
+        // Filter to only those that have an overriding solution (indicating unmanaged customization)
+        // OR are managed but exist in the Active Solution
+        var activeSolution = await GetActiveSolutionAsync();
+        var activeSolutionId = activeSolution?.GetAttributeValue<Guid>("solutionid") ?? Guid.Empty;
+
+        var unmanagedComponents = new List<Entity>();
+        foreach (var component in allComponents.Entities)
+        {
+            var overridingSolutionRef = component.GetAttributeValue<EntityReference>("overridingsolutionid");
+
+            // If there's an overriding solution, this component has been customized
+            if (overridingSolutionRef != null)
+            {
+                unmanagedComponents.Add(component);
+            }
+        }
+
+        return unmanagedComponents;
     }
 
     private async Task<int> ProcessStandardComponentsAsync(
