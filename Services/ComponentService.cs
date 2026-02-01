@@ -301,21 +301,25 @@ public class ComponentService
         await semaphore.WaitAsync();
         try
         {
-            var query = new QueryExpression("msdyn_componentlayer")
-            {
-                ColumnSet = new ColumnSet("msdyn_componentid", "msdyn_name", "msdyn_solutionname",
-                    "msdyn_solutioncomponentname", "msdyn_order", "msdyn_overwritetime", "msdyn_publishername"),
-                Criteria = new FilterExpression(LogicalOperator.And)
-                {
-                    Conditions =
-                    {
-                        new ConditionExpression("msdyn_componentid", ConditionOperator.Equal, objectId.ToString()),
-                        new ConditionExpression("msdyn_solutioncomponentname", ConditionOperator.Equal, solutionComponentName)
-                    }
-                }
-            };
+            // Use FetchXML - virtual entities sometimes work better with this
+            var fetchXml = $@"
+                <fetch>
+                    <entity name='msdyn_componentlayer'>
+                        <attribute name='msdyn_componentid' />
+                        <attribute name='msdyn_name' />
+                        <attribute name='msdyn_solutionname' />
+                        <attribute name='msdyn_solutioncomponentname' />
+                        <attribute name='msdyn_order' />
+                        <attribute name='msdyn_overwritetime' />
+                        <attribute name='msdyn_publishername' />
+                        <filter type='and'>
+                            <condition attribute='msdyn_componentid' operator='eq' value='{objectId}' />
+                            <condition attribute='msdyn_solutioncomponentname' operator='eq' value='{solutionComponentName}' />
+                        </filter>
+                    </entity>
+                </fetch>";
 
-            var result = await _dataverseService.RetrieveMultipleAsync(query);
+            var result = await _dataverseService.RetrieveMultipleAsync(new FetchExpression(fetchXml));
 
             // Find the Active layer if it exists
             foreach (var layer in result.Entities)
