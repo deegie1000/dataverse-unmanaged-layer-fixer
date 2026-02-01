@@ -5,6 +5,7 @@ using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Metadata;
 using Microsoft.Xrm.Sdk.Query;
 using System.ServiceModel;
+using System.Threading;
 
 namespace DataverseUnmanagedLayerFixer.Services;
 
@@ -271,13 +272,35 @@ public class ComponentService
         var activeLayers = new Dictionary<Guid, Entity>();
         if (objectIds.Count == 0) return activeLayers;
 
-        // Query msdyn_componentlayer for these specific components
-        // The virtual entity works best when filtered by componentid and solutioncomponentname
+        // Query msdyn_componentlayer for each component individually
+        // The virtual entity works best with single component queries (like the UI does)
+        var tasks = new List<Task<(Guid ObjectId, Entity? ActiveLayer)>>();
+        var semaphore = new SemaphoreSlim(10); // Limit concurrent requests
+
+        foreach (var objectId in objectIds)
+        {
+            tasks.Add(GetActiveLayerForComponentAsync(objectId, solutionComponentName, semaphore));
+        }
+
+        var results = await Task.WhenAll(tasks);
+
+        foreach (var (objectId, activeLayer) in results)
+        {
+            if (activeLayer != null)
+            {
+                activeLayers[objectId] = activeLayer;
+            }
+        }
+
+        return activeLayers;
+    }
+
+    private async Task<(Guid ObjectId, Entity? ActiveLayer)> GetActiveLayerForComponentAsync(
+        Guid objectId, string solutionComponentName, SemaphoreSlim semaphore)
+    {
+        await semaphore.WaitAsync();
         try
         {
-            // Convert GUIDs to strings for the query (msdyn_componentid is a string field)
-            var componentIdStrings = objectIds.Select(id => id.ToString()).ToArray();
-
             var query = new QueryExpression("msdyn_componentlayer")
             {
                 ColumnSet = new ColumnSet("msdyn_componentid", "msdyn_name", "msdyn_solutionname",
@@ -286,35 +309,34 @@ public class ComponentService
                 {
                     Conditions =
                     {
-                        new ConditionExpression("msdyn_solutioncomponentname", ConditionOperator.Equal, solutionComponentName),
-                        new ConditionExpression("msdyn_componentid", ConditionOperator.In, componentIdStrings)
+                        new ConditionExpression("msdyn_componentid", ConditionOperator.Equal, objectId.ToString()),
+                        new ConditionExpression("msdyn_solutioncomponentname", ConditionOperator.Equal, solutionComponentName)
                     }
-                },
-                PageInfo = new PagingInfo { Count = 5000, PageNumber = 1 }
+                }
             };
 
-            var layers = await _dataverseService.RetrieveAllAsync(query);
+            var result = await _dataverseService.RetrieveMultipleAsync(query);
 
-            // Filter to only Active layers and build lookup
-            foreach (var layer in layers)
+            // Find the Active layer if it exists
+            foreach (var layer in result.Entities)
             {
                 var solutionName = layer.GetAttributeValue<string>("msdyn_solutionname") ?? "";
                 if (solutionName == "Active")
                 {
-                    var componentIdStr = layer.GetAttributeValue<string>("msdyn_componentid") ?? "";
-                    if (Guid.TryParse(componentIdStr, out var compId) && !activeLayers.ContainsKey(compId))
-                    {
-                        activeLayers[compId] = layer;
-                    }
+                    return (objectId, layer);
                 }
             }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"\r  Warning: Could not query layers for {solutionComponentName}: {ex.Message}");
-        }
 
-        return activeLayers;
+            return (objectId, null);
+        }
+        catch
+        {
+            return (objectId, null);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
     }
 
     private async Task EnrichComponentNamesAsync(
