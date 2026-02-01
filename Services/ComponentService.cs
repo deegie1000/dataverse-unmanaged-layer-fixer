@@ -193,14 +193,30 @@ public class ComponentService
     {
         var results = new List<(Entity Component, Entity Layer, string LogicalName)>();
 
-        // Get managed entity names for subcomponent lookup
+        // Step 1: Find the Active Solution
+        Console.Write("\r  Finding Active Solution...                              ");
+        var activeSolution = await GetActiveSolutionAsync();
+        if (activeSolution == null)
+        {
+            Console.WriteLine("\r  Active Solution not found.                              ");
+            return results;
+        }
+
+        var activeSolutionId = activeSolution.GetAttributeValue<Guid>("solutionid");
+        Console.WriteLine($"\r  Active Solution ID: {activeSolutionId}                   ");
+
+        // Step 2: Get all components in the Active Solution (these are unmanaged customizations)
+        var activeComponents = await GetActiveSolutionComponentsAsync(activeSolutionId);
+        Console.WriteLine($"\r  Found {activeComponents.Count} components in Active Solution.          ");
+
+        // Step 3: Get managed entity names for subcomponent lookup
         var managedEntityNames = GetManagedEntityNames(components, entityMetadataMap);
         Console.WriteLine($"  Found {managedEntityNames.Count} entities in managed solution.");
 
-        // Build list of all components to check (explicit components + entity subcomponents)
-        var componentsToCheck = new List<(Guid ObjectId, int ComponentType, string LogicalName, Entity OriginalComponent)>();
+        // Step 4: Find matching components
+        var matchingComponents = new List<(Entity Component, int ComponentType, Guid ObjectId, string LogicalName)>();
 
-        // Add explicit non-entity components
+        // Check explicit non-entity components that are in the Active Solution
         foreach (var component in components)
         {
             var componentType = component.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
@@ -209,140 +225,128 @@ public class ComponentService
             if (componentType == 1) continue; // Skip entities - check their subcomponents instead
             if (objectId == Guid.Empty) continue;
 
-            var logicalName = ComponentTypeHelper.GetSolutionComponentLogicalName(componentType) ?? "unknown";
-            componentsToCheck.Add((objectId, componentType, logicalName, component));
+            // Check if this component is in the Active Solution
+            if (activeComponents.Contains((objectId, componentType)))
+            {
+                var logicalName = ComponentTypeHelper.GetSolutionComponentLogicalName(componentType) ?? "unknown";
+                matchingComponents.Add((component, componentType, objectId, logicalName));
+            }
         }
 
-        // Add entity subcomponents (forms, views, charts, attributes)
+        // Find subcomponents (forms, views, attributes) in Active Solution that belong to managed entities
         if (managedEntityNames.Count > 0)
         {
-            var subcomponents = await GetEntitySubcomponentsToCheckAsync(managedEntityNames, components);
-            componentsToCheck.AddRange(subcomponents);
+            var entitySubcomponents = await GetActiveSubcomponentsForEntitiesAsync(managedEntityNames, activeComponents);
+            matchingComponents.AddRange(entitySubcomponents);
         }
 
-        Console.WriteLine($"  Checking {componentsToCheck.Count} components for Active layers...");
+        Console.WriteLine($"  Found {matchingComponents.Count} components with unmanaged customizations.");
 
-        // Use RetrieveSolutionComponentLayers API to check each component for Active layer
-        int checkedCount = 0;
-        int foundCount = 0;
-        foreach (var (objectId, componentType, logicalName, originalComponent) in componentsToCheck)
+        // Step 5: Fetch display names and create layer entities
+        if (matchingComponents.Count > 0)
         {
-            checkedCount++;
-            if (checkedCount % 50 == 0 || checkedCount == componentsToCheck.Count)
-            {
-                Console.Write($"\r  Checking layers... ({checkedCount}/{componentsToCheck.Count}, found {foundCount})    ");
-            }
+            Console.Write("\r  Fetching component details...                           ");
 
-            var activeLayer = await GetActiveLayerAsync(objectId, logicalName);
-            if (activeLayer != null)
+            foreach (var (component, componentType, objectId, logicalName) in matchingComponents)
             {
-                foundCount++;
-                results.Add((originalComponent, activeLayer, logicalName));
+                var componentName = component.GetAttributeValue<string>("_componentname") ??
+                    $"{ComponentTypeHelper.GetComponentTypeName(componentType)} - {objectId}";
+                var entityName = component.GetAttributeValue<string>("_entityname") ?? "";
+
+                // Create a pseudo-layer entity for display
+                var activeLayer = new Entity("msdyn_componentlayer");
+                activeLayer["msdyn_solutionname"] = "Active";
+                activeLayer["msdyn_componentid"] = objectId.ToString();
+                activeLayer["msdyn_name"] = componentName;
+
+                results.Add((component, activeLayer, logicalName));
             }
+            Console.WriteLine($"\r  Component details fetched.                              ");
         }
-
-        Console.WriteLine($"\r  Found {foundCount} components with Active layers.                    ");
 
         return results;
     }
 
-    private async Task<Entity?> GetActiveLayerAsync(Guid componentId, string solutionComponentName)
+    private async Task<HashSet<(Guid ObjectId, int ComponentType)>> GetActiveSolutionComponentsAsync(Guid activeSolutionId)
     {
-        try
-        {
-            var request = new OrganizationRequest("RetrieveSolutionComponentLayers")
-            {
-                Parameters =
-                {
-                    { "SolutionComponentName", solutionComponentName },
-                    { "ComponentId", componentId }
-                }
-            };
+        var activeComponents = new HashSet<(Guid ObjectId, int ComponentType)>();
 
-            var response = await _dataverseService.ExecuteAsync(request);
-
-            if (response.Results.TryGetValue("SolutionComponentLayers", out var layersObj) &&
-                layersObj is EntityCollection layers)
-            {
-                // Look for the Active layer (msdyn_solutionname == "Active")
-                foreach (var layer in layers.Entities)
-                {
-                    var solutionName = layer.GetAttributeValue<string>("msdyn_solutionname");
-                    if (solutionName == "Active")
-                    {
-                        return layer;
-                    }
-                }
-            }
-        }
-        catch (Exception ex)
+        var query = new QueryExpression("solutioncomponent")
         {
-            // Log first few errors to help debug
-            if (_layerApiErrorCount < 3)
+            ColumnSet = new ColumnSet("objectid", "componenttype"),
+            Criteria = new FilterExpression
             {
-                Console.WriteLine($"\n  [DEBUG] Layer API error for {solutionComponentName}/{componentId}: {ex.Message}");
-                _layerApiErrorCount++;
+                Conditions = { new ConditionExpression("solutionid", ConditionOperator.Equal, activeSolutionId) }
+            },
+            PageInfo = new PagingInfo { Count = 5000, PageNumber = 1 }
+        };
+
+        var components = await _dataverseService.RetrieveAllAsync(query, (page, _) =>
+        {
+            Console.Write($"\r  Fetching Active Solution components... (page {page})    ");
+        });
+
+        foreach (var comp in components)
+        {
+            var objId = comp.GetAttributeValue<Guid>("objectid");
+            var compType = comp.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
+            if (objId != Guid.Empty)
+            {
+                activeComponents.Add((objId, compType));
             }
         }
 
-        return null;
+        return activeComponents;
     }
 
-    private int _layerApiErrorCount = 0;
-
-    private async Task<List<(Guid ObjectId, int ComponentType, string LogicalName, Entity Component)>> GetEntitySubcomponentsToCheckAsync(
-        HashSet<string> entityNames, List<Entity> managedComponents)
+    private async Task<List<(Entity Component, int ComponentType, Guid ObjectId, string LogicalName)>> GetActiveSubcomponentsForEntitiesAsync(
+        HashSet<string> entityNames, HashSet<(Guid ObjectId, int ComponentType)> activeComponents)
     {
-        var results = new List<(Guid ObjectId, int ComponentType, string LogicalName, Entity Component)>();
+        var results = new List<(Entity Component, int ComponentType, Guid ObjectId, string LogicalName)>();
 
-        // Build set of managed component IDs for filtering
-        var managedComponentIds = managedComponents
-            .Select(c => c.GetAttributeValue<Guid>("objectid"))
-            .Where(id => id != Guid.Empty)
-            .ToHashSet();
-
-        // Check forms
-        Console.Write("\r  Loading forms...                                        ");
-        var forms = await GetSubcomponentRecordsAsync("systemform", "formid", "objecttypecode", "name", entityNames, managedComponentIds);
+        // Check forms (type 60) - query ALL forms for managed entities, then check if in Active Solution
+        Console.Write("\r  Checking forms...                                        ");
+        var forms = await GetEntitySubcomponentsInActiveAsync("systemform", "formid", "objecttypecode", "name", entityNames, activeComponents, 60);
         foreach (var (id, name, entityName) in forms)
         {
             var comp = CreateSubcomponentEntity(id, 60, name, entityName);
-            results.Add((id, 60, "systemform", comp));
+            results.Add((comp, 60, id, "systemform"));
         }
 
-        // Check views
-        Console.Write("\r  Loading views...                                        ");
-        var views = await GetSubcomponentRecordsAsync("savedquery", "savedqueryid", "returnedtypecode", "name", entityNames, managedComponentIds);
+        // Check views (type 26)
+        Console.Write("\r  Checking views...                                        ");
+        var views = await GetEntitySubcomponentsInActiveAsync("savedquery", "savedqueryid", "returnedtypecode", "name", entityNames, activeComponents, 26);
         foreach (var (id, name, entityName) in views)
         {
             var comp = CreateSubcomponentEntity(id, 26, name, entityName);
-            results.Add((id, 26, "savedquery", comp));
+            results.Add((comp, 26, id, "savedquery"));
         }
 
-        // Check charts
-        Console.Write("\r  Loading charts...                                       ");
-        var charts = await GetSubcomponentRecordsAsync("savedqueryvisualization", "savedqueryvisualizationid", "primaryentitytypecode", "name", entityNames, managedComponentIds);
+        // Check charts (type 59)
+        Console.Write("\r  Checking charts...                                       ");
+        var charts = await GetEntitySubcomponentsInActiveAsync("savedqueryvisualization", "savedqueryvisualizationid", "primaryentitytypecode", "name", entityNames, activeComponents, 59);
         foreach (var (id, name, entityName) in charts)
         {
             var comp = CreateSubcomponentEntity(id, 59, name, entityName);
-            results.Add((id, 59, "savedqueryvisualization", comp));
+            results.Add((comp, 59, id, "savedqueryvisualization"));
         }
 
-        // Check attributes
-        Console.Write("\r  Loading attributes...                                   ");
-        var attributes = await GetEntityAttributesToCheckAsync(entityNames, managedComponentIds);
-        foreach (var (id, name, entityName) in attributes)
+        // Check attributes (type 2)
+        Console.Write("\r  Checking attributes...                                   ");
+        var attributes = await GetEntityAttributesInActiveAsync(entityNames, activeComponents);
+        foreach (var (id, entityName, attrName) in attributes)
         {
-            var comp = CreateSubcomponentEntity(id, 2, name, entityName);
-            results.Add((id, 2, "attribute", comp));
+            var comp = CreateSubcomponentEntity(id, 2, $"{entityName}.{attrName}", entityName);
+            results.Add((comp, 2, id, "attribute"));
         }
 
+        Console.WriteLine($"\r  Found {results.Count} entity subcomponents with customizations.          ");
         return results;
     }
 
-    private async Task<List<(Guid Id, string Name, string EntityName)>> GetSubcomponentRecordsAsync(
+    private async Task<List<(Guid Id, string Name, string EntityName)>> GetEntitySubcomponentsInActiveAsync(
         string tableName, string idColumn, string entityColumn, string nameColumn,
-        HashSet<string> entityNames, HashSet<Guid> managedComponentIds)
+        HashSet<string> entityNames, HashSet<(Guid ObjectId, int ComponentType)> activeComponents, int componentType)
     {
         var results = new List<(Guid Id, string Name, string EntityName)>();
 
@@ -366,8 +370,8 @@ public class ComponentService
                 var name = entity.GetAttributeValue<string>(nameColumn) ?? "Unknown";
                 var entityName = entity.GetAttributeValue<string>(entityColumn) ?? "Unknown";
 
-                // Only include if it's in the managed solution
-                if (managedComponentIds.Contains(id))
+                // Check if this subcomponent is in the Active Solution (has unmanaged customization)
+                if (activeComponents.Contains((id, componentType)))
                 {
                     results.Add((id, $"{entityName}.{name}", entityName));
                 }
@@ -378,10 +382,10 @@ public class ComponentService
         return results;
     }
 
-    private async Task<List<(Guid Id, string Name, string EntityName)>> GetEntityAttributesToCheckAsync(
-        HashSet<string> entityNames, HashSet<Guid> managedComponentIds)
+    private async Task<List<(Guid MetadataId, string EntityName, string AttributeName)>> GetEntityAttributesInActiveAsync(
+        HashSet<string> entityNames, HashSet<(Guid ObjectId, int ComponentType)> activeComponents)
     {
-        var results = new List<(Guid Id, string Name, string EntityName)>();
+        var results = new List<(Guid MetadataId, string EntityName, string AttributeName)>();
 
         try
         {
@@ -401,11 +405,10 @@ public class ComponentService
                 foreach (var attr in entityMetadata.Attributes)
                 {
                     var attrId = attr.MetadataId ?? Guid.Empty;
-                    // Only include if it's in the managed solution
-                    if (attrId != Guid.Empty && managedComponentIds.Contains(attrId))
+                    // Check if this attribute is in the Active Solution (has unmanaged customization)
+                    if (attrId != Guid.Empty && activeComponents.Contains((attrId, 2)))
                     {
-                        var displayName = attr.DisplayName?.UserLocalizedLabel?.Label ?? attr.LogicalName;
-                        results.Add((attrId, $"{entityMetadata.LogicalName}.{displayName}", entityMetadata.LogicalName));
+                        results.Add((attrId, entityMetadata.LogicalName, attr.LogicalName));
                     }
                 }
             }
@@ -619,12 +622,71 @@ public class ComponentService
         if (powerPagesComponents.Count == 0)
             return new List<Entity>();
 
-        // Power Pages components don't support RetrieveSolutionComponentLayers API well
-        // Skip them for now - they require manual verification in the maker portal
-        Console.WriteLine($"  Note: Power Pages layer detection is not currently supported.");
-        Console.WriteLine($"  Please check Power Pages components manually in the maker portal.");
+        var unmanagedComponents = new List<Entity>();
 
-        return new List<Entity>();
+        try
+        {
+            // Get the Active Solution ID
+            Console.Write("\r  Finding Active Solution for Power Pages...              ");
+            var activeSolution = await GetActiveSolutionAsync();
+            if (activeSolution == null)
+            {
+                Console.WriteLine("\r  Active Solution not found.                              ");
+                return unmanagedComponents;
+            }
+
+            var activeSolutionId = activeSolution.GetAttributeValue<Guid>("solutionid");
+
+            // Query powerpagecomponent table for unmanaged customizations
+            // Components with solutionid = Active Solution represent unmanaged customizations
+            Console.Write("\r  Querying powerpagecomponent table...                    ");
+
+            var ppQuery = new QueryExpression("powerpagecomponent")
+            {
+                ColumnSet = new ColumnSet("powerpagecomponentid", "name", "powerpagecomponenttype",
+                    "solutionid", "modifiedby", "modifiedon"),
+                Criteria = new FilterExpression
+                {
+                    Conditions =
+                    {
+                        new ConditionExpression("solutionid", ConditionOperator.Equal, activeSolutionId)
+                    }
+                },
+                PageInfo = new PagingInfo { Count = 5000, PageNumber = 1 }
+            };
+
+            var allActiveComponents = await _dataverseService.RetrieveAllAsync(ppQuery, (page, count) =>
+            {
+                Console.Write($"\r  Querying powerpagecomponent... (page {page}, {count} found)    ");
+            });
+
+            Console.WriteLine($"\r  Found {allActiveComponents.Count} Power Pages components in Active Solution.          ");
+
+            // Get the component IDs from the managed solution we're checking
+            var solutionComponentIds = new HashSet<Guid>(
+                powerPagesComponents
+                    .Select(c => c.GetAttributeValue<Guid>("objectid"))
+                    .Where(id => id != Guid.Empty)
+            );
+
+            // Filter to only components that are in our target managed solution
+            foreach (var ppComponent in allActiveComponents)
+            {
+                var ppId = ppComponent.GetAttributeValue<Guid>("powerpagecomponentid");
+                if (solutionComponentIds.Contains(ppId))
+                {
+                    unmanagedComponents.Add(ppComponent);
+                }
+            }
+
+            Console.WriteLine($"  Found {unmanagedComponents.Count} Power Pages components with unmanaged customizations.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Error checking Power Pages: {ex.Message}");
+        }
+
+        return unmanagedComponents;
     }
 
     private async Task<int> ProcessStandardComponentsAsync(
