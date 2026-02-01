@@ -321,6 +321,18 @@ public class ComponentService
 
             var result = await _dataverseService.RetrieveMultipleAsync(new FetchExpression(fetchXml));
 
+            // Debug: log the first few queries
+            if (result.Entities.Count > 0)
+            {
+                Console.WriteLine($"\n    [DEBUG] Found {result.Entities.Count} layers for {solutionComponentName} {objectId}");
+                foreach (var layer in result.Entities)
+                {
+                    var solName = layer.GetAttributeValue<string>("msdyn_solutionname") ?? "null";
+                    var compName = layer.GetAttributeValue<string>("msdyn_name") ?? "null";
+                    Console.WriteLine($"      - Solution: {solName}, Name: {compName}");
+                }
+            }
+
             // Find the Active layer if it exists
             foreach (var layer in result.Entities)
             {
@@ -333,8 +345,9 @@ public class ComponentService
 
             return (objectId, null);
         }
-        catch
+        catch (Exception ex)
         {
+            Console.WriteLine($"\n    [ERROR] Query failed for {solutionComponentName} {objectId}: {ex.Message}");
             return (objectId, null);
         }
         finally
