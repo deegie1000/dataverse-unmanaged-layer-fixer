@@ -108,6 +108,19 @@ public static class ComponentTypeHelper
             430 => "Entity Analytics Configuration",
             431 => "Attribute Image Configuration",
             432 => "Entity Image Configuration",
+            // Modern components (10000+ range)
+            10112 => "Connection Reference",
+            10140 => "Custom API",
+            10141 => "Custom API Request Parameter",
+            10142 => "Custom API Response Property",
+            10029 => "Flow Machine",
+            10030 => "Flow Machine Group",
+            10076 => "Desktop Flow Module",
+            10039 => "AI Builder Dataset",
+            10040 => "AI Builder File",
+            10041 => "AI Builder Dataset File",
+            10313 => "Catalog Assignment",
+            10330 => "Package",
             _ => $"Unknown ({componentType})"
         };
     }
@@ -197,6 +210,12 @@ public static class ComponentTypeHelper
             161 => "mobileofflineprofile",
             162 => "mobileofflineprofileitem",
 
+            // Modern components
+            10112 => "connectionreference",
+            10140 => "customapi",
+            10141 => "customapirequestparameter",
+            10142 => "customapiresponseproperty",
+
             _ => null
         };
     }
@@ -242,6 +261,11 @@ public static class ComponentTypeHelper
             371 => "Connector",
             380 => "Environment Variable Definition",
             381 => "Environment Variable Value",
+            // Modern components
+            10112 => "Connection Reference",
+            10140 => "Custom API",
+            10141 => "Custom API Request Parameter",
+            10142 => "Custom API Response Property",
             _ => null
         };
     }

@@ -434,6 +434,15 @@ public class ComponentService
                 case 9: // Option Set
                     await FetchOptionSetNamesForEnrichAsync(objectIds, names);
                     break;
+                case 10112: // Connection Reference
+                    await FetchNamesFromTableAsync("connectionreference", "connectionreferenceid", "connectionreferencelogicalname", objectIds, names, "Connection Reference");
+                    break;
+                case 10140: // Custom API
+                    await FetchNamesFromTableAsync("customapi", "customapiid", "name", objectIds, names, "Custom API");
+                    break;
+                case 371: // Connector
+                    await FetchNamesFromTableAsync("connector", "connectorid", "name", objectIds, names, "Connector");
+                    break;
                 default:
                     // For unknown types, return empty - we'll use fallback
                     break;
