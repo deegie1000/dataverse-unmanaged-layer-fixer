@@ -78,6 +78,14 @@ public class DataverseService : IDisposable
     }
 
     /// <summary>
+    /// Retrieves multiple records using a FetchXML expression.
+    /// </summary>
+    public async Task<EntityCollection> RetrieveMultipleAsync(FetchExpression fetchExpression)
+    {
+        return await Task.Run(() => ServiceClient.RetrieveMultiple(fetchExpression));
+    }
+
+    /// <summary>
     /// Retrieves a single record by ID.
     /// </summary>
     public async Task<Entity> RetrieveAsync(string entityName, Guid id, ColumnSet columnSet)
