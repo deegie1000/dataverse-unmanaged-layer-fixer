@@ -321,25 +321,36 @@ public class ComponentService
 
             var result = await _dataverseService.RetrieveMultipleAsync(new FetchExpression(fetchXml));
 
-            // Debug: log the first few queries
-            if (result.Entities.Count > 0)
+            // A component has an unmanaged layer if:
+            // 1. It has more than 1 layer (both managed and active)
+            // 2. The top layer (highest msdyn_order) is "Active"
+            if (result.Entities.Count <= 1)
             {
-                Console.WriteLine($"\n    [DEBUG] Found {result.Entities.Count} layers for {solutionComponentName} {objectId}");
-                foreach (var layer in result.Entities)
+                // Only one layer or none - no unmanaged customization on top of managed
+                return (objectId, null);
+            }
+
+            // Find the top layer (highest order)
+            Entity? topLayer = null;
+            int highestOrder = int.MinValue;
+
+            foreach (var layer in result.Entities)
+            {
+                var order = layer.GetAttributeValue<int>("msdyn_order");
+                if (order > highestOrder)
                 {
-                    var solName = layer.GetAttributeValue<string>("msdyn_solutionname") ?? "null";
-                    var compName = layer.GetAttributeValue<string>("msdyn_name") ?? "null";
-                    Console.WriteLine($"      - Solution: {solName}, Name: {compName}");
+                    highestOrder = order;
+                    topLayer = layer;
                 }
             }
 
-            // Find the Active layer if it exists
-            foreach (var layer in result.Entities)
+            // Check if the top layer is Active
+            if (topLayer != null)
             {
-                var solutionName = layer.GetAttributeValue<string>("msdyn_solutionname") ?? "";
+                var solutionName = topLayer.GetAttributeValue<string>("msdyn_solutionname") ?? "";
                 if (solutionName == "Active")
                 {
-                    return (objectId, layer);
+                    return (objectId, topLayer);
                 }
             }
 
