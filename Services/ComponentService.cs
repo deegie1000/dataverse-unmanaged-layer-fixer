@@ -264,7 +264,7 @@ public class ComponentService
             if (response.Results.TryGetValue("SolutionComponentLayers", out var layersObj) &&
                 layersObj is EntityCollection layers)
             {
-                // Look for the Active layer (msdyn_solutionname == "Active" or order == 0)
+                // Look for the Active layer (msdyn_solutionname == "Active")
                 foreach (var layer in layers.Entities)
                 {
                     var solutionName = layer.GetAttributeValue<string>("msdyn_solutionname");
@@ -275,13 +275,20 @@ public class ComponentService
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Component might not support layers or other error - skip it
+            // Log first few errors to help debug
+            if (_layerApiErrorCount < 3)
+            {
+                Console.WriteLine($"\n  [DEBUG] Layer API error for {solutionComponentName}/{componentId}: {ex.Message}");
+                _layerApiErrorCount++;
+            }
         }
 
         return null;
     }
+
+    private int _layerApiErrorCount = 0;
 
     private async Task<List<(Guid ObjectId, int ComponentType, string LogicalName, Entity Component)>> GetEntitySubcomponentsToCheckAsync(
         HashSet<string> entityNames, List<Entity> managedComponents)
@@ -612,61 +619,12 @@ public class ComponentService
         if (powerPagesComponents.Count == 0)
             return new List<Entity>();
 
-        // Build list of Power Pages components to check
-        var componentsToCheck = new List<(Guid ObjectId, string LogicalName)>();
-        foreach (var comp in powerPagesComponents)
-        {
-            var objectId = comp.GetAttributeValue<Guid>("objectid");
-            if (objectId != Guid.Empty)
-            {
-                // Power Pages components use "powerpagecomponent" as the logical name
-                componentsToCheck.Add((objectId, "powerpagecomponent"));
-            }
-        }
+        // Power Pages components don't support RetrieveSolutionComponentLayers API well
+        // Skip them for now - they require manual verification in the maker portal
+        Console.WriteLine($"  Note: Power Pages layer detection is not currently supported.");
+        Console.WriteLine($"  Please check Power Pages components manually in the maker portal.");
 
-        if (componentsToCheck.Count == 0)
-            return new List<Entity>();
-
-        Console.WriteLine($"  Checking {componentsToCheck.Count} Power Pages components for Active layers...");
-
-        // Use RetrieveSolutionComponentLayers API to check each component
-        var matchingIds = new HashSet<Guid>();
-        int checkedCount = 0;
-        foreach (var (objectId, logicalName) in componentsToCheck)
-        {
-            checkedCount++;
-            if (checkedCount % 100 == 0 || checkedCount == componentsToCheck.Count)
-            {
-                Console.Write($"\r  Checking Power Pages layers... ({checkedCount}/{componentsToCheck.Count}, found {matchingIds.Count})    ");
-            }
-
-            var activeLayer = await GetActiveLayerAsync(objectId, logicalName);
-            if (activeLayer != null)
-            {
-                matchingIds.Add(objectId);
-            }
-        }
-
-        Console.WriteLine($"\r  Found {matchingIds.Count} Power Pages components with Active layers.          ");
-
-        if (matchingIds.Count == 0)
-            return new List<Entity>();
-
-        // Fetch full details for matching Power Pages components
-        var query = new QueryExpression("powerpagecomponent")
-        {
-            ColumnSet = new ColumnSet("powerpagecomponentid", "name", "powerpagecomponenttype", "modifiedon", "modifiedby"),
-            Criteria = new FilterExpression
-            {
-                Conditions =
-                {
-                    new ConditionExpression("powerpagecomponentid", ConditionOperator.In, matchingIds.Cast<object>().ToArray())
-                }
-            }
-        };
-
-        var result = await _dataverseService.RetrieveMultipleAsync(query);
-        return result.Entities.ToList();
+        return new List<Entity>();
     }
 
     private async Task<int> ProcessStandardComponentsAsync(
