@@ -320,7 +320,13 @@ public class ComponentService
     {
         var matchingComponents = new List<(Entity Component, int ComponentType, Guid ObjectId, string LogicalName)>();
 
-        // Check explicit non-entity components
+        // Build a set of all component IDs that are explicitly in the managed solution
+        var managedComponentIds = components
+            .Select(c => c.GetAttributeValue<Guid>("objectid"))
+            .Where(id => id != Guid.Empty)
+            .ToHashSet();
+
+        // Check all non-entity components that are in both managed solution AND Active Solution
         foreach (var component in components)
         {
             var componentType = component.GetAttributeValue<OptionSetValue>("componenttype")?.Value ?? 0;
@@ -335,11 +341,11 @@ public class ComponentService
             }
         }
 
-        // Find subcomponents for managed entities
+        // Find subcomponents for managed entities - only those explicitly in managed solution
         if (managedEntityNames.Count > 0)
         {
             var entitySubcomponents = await GetActiveSubcomponentsForEntitiesAsync(
-                activeSolutionId, managedEntityNames, activeComponents);
+                activeSolutionId, managedEntityNames, activeComponents, managedComponentIds);
             matchingComponents.AddRange(entitySubcomponents);
         }
 
@@ -347,43 +353,44 @@ public class ComponentService
     }
 
     private async Task<List<(Entity Component, int ComponentType, Guid ObjectId, string LogicalName)>> GetActiveSubcomponentsForEntitiesAsync(
-        Guid activeSolutionId, HashSet<string> entityNames, HashSet<(Guid ObjectId, int ComponentType)> activeComponents)
+        Guid activeSolutionId, HashSet<string> entityNames, HashSet<(Guid ObjectId, int ComponentType)> activeComponents,
+        HashSet<Guid> managedComponentIds)
     {
         var results = new List<(Entity Component, int ComponentType, Guid ObjectId, string LogicalName)>();
 
-        // Check forms
+        // Check forms - must be in both managed solution AND Active Solution
         Console.Write("\r  Checking forms...                                        ");
         var forms = await GetEntitySubcomponentsAsync("systemform", "formid", "objecttypecode", "name",
-            entityNames, activeComponents, 60);
+            entityNames, activeComponents, managedComponentIds, 60);
         foreach (var (id, name, entityName) in forms)
         {
             var comp = CreateSubcomponentEntity(id, 60, name, entityName);
             results.Add((comp, 60, id, "systemform"));
         }
 
-        // Check views
+        // Check views - must be in both managed solution AND Active Solution
         Console.Write("\r  Checking views...                                        ");
         var views = await GetEntitySubcomponentsAsync("savedquery", "savedqueryid", "returnedtypecode", "name",
-            entityNames, activeComponents, 26);
+            entityNames, activeComponents, managedComponentIds, 26);
         foreach (var (id, name, entityName) in views)
         {
             var comp = CreateSubcomponentEntity(id, 26, name, entityName);
             results.Add((comp, 26, id, "savedquery"));
         }
 
-        // Check charts
+        // Check charts - must be in both managed solution AND Active Solution
         Console.Write("\r  Checking charts...                                       ");
         var charts = await GetEntitySubcomponentsAsync("savedqueryvisualization", "savedqueryvisualizationid",
-            "primaryentitytypecode", "name", entityNames, activeComponents, 59);
+            "primaryentitytypecode", "name", entityNames, activeComponents, managedComponentIds, 59);
         foreach (var (id, name, entityName) in charts)
         {
             var comp = CreateSubcomponentEntity(id, 59, name, entityName);
             results.Add((comp, 59, id, "savedqueryvisualization"));
         }
 
-        // Check attributes
+        // Check attributes - must be in both managed solution AND Active Solution
         Console.Write("\r  Checking attributes...                                   ");
-        var attributes = await GetEntityAttributesInActiveAsync(entityNames, activeComponents);
+        var attributes = await GetEntityAttributesInActiveAsync(entityNames, activeComponents, managedComponentIds);
         foreach (var (id, name, entityName) in attributes)
         {
             var comp = CreateSubcomponentEntity(id, 2, name, entityName);
@@ -405,7 +412,8 @@ public class ComponentService
 
     private async Task<List<(Guid Id, string Name, string EntityName)>> GetEntitySubcomponentsAsync(
         string tableName, string idColumn, string entityColumn, string nameColumn,
-        HashSet<string> entityNames, HashSet<(Guid ObjectId, int ComponentType)> activeComponents, int componentType)
+        HashSet<string> entityNames, HashSet<(Guid ObjectId, int ComponentType)> activeComponents,
+        HashSet<Guid> managedComponentIds, int componentType)
     {
         var results = new List<(Guid Id, string Name, string EntityName)>();
 
@@ -429,7 +437,8 @@ public class ComponentService
                 var name = entity.GetAttributeValue<string>(nameColumn) ?? "Unknown";
                 var entityName = entity.GetAttributeValue<string>(entityColumn) ?? "Unknown";
 
-                if (activeComponents.Contains((id, componentType)))
+                // Must be in BOTH managed solution AND Active Solution
+                if (managedComponentIds.Contains(id) && activeComponents.Contains((id, componentType)))
                 {
                     results.Add((id, $"{entityName}.{name}", entityName));
                 }
@@ -441,7 +450,8 @@ public class ComponentService
     }
 
     private async Task<List<(Guid Id, string Name, string EntityName)>> GetEntityAttributesInActiveAsync(
-        HashSet<string> entityNames, HashSet<(Guid ObjectId, int ComponentType)> activeComponents)
+        HashSet<string> entityNames, HashSet<(Guid ObjectId, int ComponentType)> activeComponents,
+        HashSet<Guid> managedComponentIds)
     {
         var results = new List<(Guid Id, string Name, string EntityName)>();
 
@@ -463,7 +473,8 @@ public class ComponentService
                 foreach (var attr in entityMetadata.Attributes)
                 {
                     var attrId = attr.MetadataId ?? Guid.Empty;
-                    if (attrId != Guid.Empty && activeComponents.Contains((attrId, 2)))
+                    // Must be in BOTH managed solution AND Active Solution
+                    if (attrId != Guid.Empty && managedComponentIds.Contains(attrId) && activeComponents.Contains((attrId, 2)))
                     {
                         var displayName = attr.DisplayName?.UserLocalizedLabel?.Label ?? attr.LogicalName;
                         results.Add((attrId, $"{entityMetadata.LogicalName}.{displayName}", entityMetadata.LogicalName));
