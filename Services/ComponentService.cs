@@ -518,6 +518,36 @@ public class ComponentService
                     case 29: // Workflow
                         await FetchComponentNamesAsync("workflow", "workflowid", "name", objectIds, names, "Workflow");
                         break;
+                    case 20: // Security Role
+                        await FetchComponentNamesAsync("role", "roleid", "name", objectIds, names, "Role");
+                        break;
+                    case 380: // Environment Variable Definition
+                        await FetchComponentNamesAsync("environmentvariabledefinition", "environmentvariabledefinitionid", "displayname", objectIds, names, "Env Variable");
+                        break;
+                    case 381: // Environment Variable Value
+                        await FetchComponentNamesAsync("environmentvariablevalue", "environmentvariablevalueid", "schemaname", objectIds, names, "Env Variable Value");
+                        break;
+                    case 80: // Model-driven App
+                        await FetchComponentNamesAsync("appmodule", "appmoduleid", "name", objectIds, names, "App");
+                        break;
+                    case 300: // Canvas App
+                        await FetchComponentNamesAsync("canvasapp", "canvasappid", "name", objectIds, names, "Canvas App");
+                        break;
+                    case 91: // Plugin Assembly
+                        await FetchComponentNamesAsync("pluginassembly", "pluginassemblyid", "name", objectIds, names, "Plugin Assembly");
+                        break;
+                    case 92: // SDK Message Processing Step
+                        await FetchComponentNamesAsync("sdkmessageprocessingstep", "sdkmessageprocessingstepid", "name", objectIds, names, "Plugin Step");
+                        break;
+                    case 62: // Site Map
+                        await FetchComponentNamesAsync("sitemap", "sitemapid", "sitemapname", objectIds, names, "Site Map");
+                        break;
+                    case 63: // Connection Role
+                        await FetchComponentNamesAsync("connectionrole", "connectionroleid", "name", objectIds, names, "Connection Role");
+                        break;
+                    case 9: // Option Set
+                        await FetchOptionSetNamesAsync(objectIds, names);
+                        break;
                     case 2: // Attribute
                         foreach (var (comp, _, objId, _) in group)
                         {
@@ -579,6 +609,34 @@ public class ComponentService
         {
             if (!names.ContainsKey(id))
                 names[id] = $"{typePrefix}: {id}";
+        }
+    }
+
+    private async Task FetchOptionSetNamesAsync(List<Guid> objectIds, Dictionary<Guid, string> names)
+    {
+        if (objectIds.Count == 0) return;
+
+        try
+        {
+            var request = new RetrieveAllOptionSetsRequest();
+            var response = (RetrieveAllOptionSetsResponse)await _dataverseService.ExecuteAsync(request);
+
+            var idSet = objectIds.ToHashSet();
+            foreach (var optionSet in response.OptionSetMetadata)
+            {
+                if (optionSet.MetadataId.HasValue && idSet.Contains(optionSet.MetadataId.Value))
+                {
+                    var displayName = optionSet.DisplayName?.UserLocalizedLabel?.Label ?? optionSet.Name;
+                    names[optionSet.MetadataId.Value] = $"Option Set: {displayName}";
+                }
+            }
+        }
+        catch { /* Silently fail */ }
+
+        foreach (var id in objectIds)
+        {
+            if (!names.ContainsKey(id))
+                names[id] = $"Option Set: {id}";
         }
     }
 
